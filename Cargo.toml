@@ -1,0 +1,28 @@
+[package]
+name = "usiem-query"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Pipe search language, predicates and query executor over uSIEM events, with pluggable storage backends."
+license = "MIT"
+
+[dependencies]
+usiem = { path = "../usiem", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", optional = true }
+usiem-evstore = { path = "../usiem-evstore", optional = true }
+
+[dev-dependencies]
+serde_json = "1"
+
+[features]
+default = ["jsonl"]
+# `store::jsonl::JsonlStore`: the interim JSON-lines backend, also the oracle
+# other backends are tested against.
+jsonl = ["dep:serde_json", "usiem/json"]
+# `store::evstore::EvstoreSource`: the usiem-evstore backend.
+evstore = ["dep:usiem-evstore", "dep:serde_json", "usiem/json"]
+
+# Optimized dependencies keep debug test runs (serde_json, zstd) fast.
+[profile.dev.package."*"]
+opt-level = 2
