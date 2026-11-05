@@ -4,6 +4,7 @@ use super::{Agg, AggFunc, Command, GroupKey, Query, SortKey, Span};
 use crate::store::predicate::parse_time;
 use crate::store::{Cidr, FieldOp, Literal, Pattern, Predicate, TimeRange};
 use std::fmt;
+use usiem::event::Timestamp;
 
 /// A syntax error. `pos` is a byte offset into the query text.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,6 +22,16 @@ impl fmt::Display for ParseError {
 impl std::error::Error for ParseError {}
 
 type Result<T> = std::result::Result<T, ParseError>;
+
+/// `now`, or a duration before now: `-15m`, `-24h`, `-7d`.
+fn relative_time(text: &str) -> Option<Timestamp> {
+    let now = Timestamp::now();
+    if text.eq_ignore_ascii_case("now") {
+        return Some(now);
+    }
+    let ago = super::parse_duration(text.strip_prefix('-')?)?;
+    (ago >= 0).then(|| Timestamp(now.as_nanos().saturating_sub(ago)))
+}
 
 pub fn parse(input: &str) -> Result<Query> {
     let segments = split_pipes(input)?;
@@ -278,10 +289,10 @@ impl<'a> FilterParser<'a> {
             }
             let value_pos = self.pos;
             let (value, _) = self.value()?;
-            let Some(time) = parse_time(&value) else {
+            let Some(time) = parse_time(&value).or_else(|| relative_time(&value)) else {
                 self.pos = value_pos;
                 return self.error(format!(
-                    "{value:?} is not a time (use YYYY-MM-DD, 'YYYY-MM-DD hh:mm:ss' or RFC 3339)"
+                    "{value:?} is not a time (use -24h, now, YYYY-MM-DD, 'YYYY-MM-DD hh:mm:ss' or RFC 3339)"
                 ));
             };
             if field == "earliest" {
@@ -735,6 +746,13 @@ mod tests {
             parse("earliest=2024-01-01").unwrap().filter,
             Predicate::True
         );
+        let q = parse("earliest=-1h latest=now").unwrap();
+        let (start, end) = (
+            q.time.start.unwrap().as_nanos(),
+            q.time.end.unwrap().as_nanos(),
+        );
+        let hour = 3_600_000_000_000;
+        assert!((hour..hour + 1_000_000_000).contains(&(end - start)));
         let err = parse("earliest=yesterday").unwrap_err();
         assert_eq!(err.pos, 9);
         assert!(parse("* | where earliest=2024-01-01").is_err());

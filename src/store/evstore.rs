@@ -42,7 +42,7 @@ use usiem_evstore as ev;
 
 use super::{
     AppendAck, Cidr, EventIter, EventSource, EventStore, FieldCatalog, FieldKind, FieldOp, Literal,
-    Order, Predicate, StatsTable, StoreError, StoreQuery, compare_values,
+    Order, Pattern, Predicate, StatsTable, StoreError, StoreQuery, compare_values,
 };
 use crate::Event;
 use crate::query::exec::{StatsGroup, display_value, stats_table};
@@ -297,6 +297,11 @@ fn translate_exact(registry: &ev::FieldRegistry, pred: &Predicate) -> Option<ev:
                 FieldOp::Range { .. } => !types.contains(&T::Ip),
                 FieldOp::Wildcard(_) => types.iter().all(|t| *t == T::Str),
                 FieldOp::Cidr(c) => c.addr.is_ipv4() && types.iter().all(|t| *t == T::Ip),
+                // Exact as globs only when no needle holds glob syntax.
+                FieldOp::ContainsAny(subs) => {
+                    types.iter().all(|t| *t == T::Str)
+                        && subs.needles().iter().all(|n| !Pattern::has_wildcards(n))
+                }
             };
             if !ok {
                 return None;
@@ -853,6 +858,15 @@ fn value_filters(name: &str, op: &FieldOp, out: &mut Vec<ev::Filter>) {
             let (lo, hi) = cidr_range(c);
             out.push(f(ev::FieldOp::Cidr { lo, hi }));
             out.push(f(ev::FieldOp::HasType(ev::ValueType::Str)));
+        }
+        FieldOp::ContainsAny(subs) => {
+            for n in subs.needles() {
+                value_filters(
+                    name,
+                    &FieldOp::Wildcard(Pattern::new(&format!("*{n}*"))),
+                    out,
+                );
+            }
         }
     }
 }

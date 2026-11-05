@@ -9,6 +9,7 @@ license = "MIT"
 [dependencies]
 usiem = { path = "../usiem", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
+aho-corasick = "1"
 serde_json = { version = "1", optional = true }
 usiem-evstore = { path = "../usiem-evstore", optional = true }
 

@@ -25,7 +25,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use usiem::event::{FieldValue, Timestamp};
 
-pub use predicate::{Cidr, FieldOp, Literal, Pattern, Predicate, Record, compare_values, lookup};
+pub use predicate::{
+    Cidr, FieldOp, Literal, Pattern, Predicate, Record, Substrings, compare_values, lookup,
+};
 
 #[derive(Debug)]
 pub enum StoreError {

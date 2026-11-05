@@ -39,6 +39,10 @@ pub enum FieldOp {
         upper: Option<(Literal, bool)>,
     },
     Cidr(Cidr),
+    /// Contains any of several substrings, case-insensitive: what
+    /// `f:*a* OR f:*b* OR ...` means, in one pass over the value. Built in
+    /// code (detection rules); the query parser never produces it.
+    ContainsAny(Substrings),
 }
 
 impl Predicate {
@@ -82,6 +86,105 @@ impl Predicate {
             Predicate::Not(p) => p.visit_fields(f),
             Predicate::Field { field, .. } => f(field),
         }
+    }
+}
+
+/// Renders the predicate in query syntax. Best effort, for display (a rule
+/// compiled from another format shows what it became): simple predicates
+/// parse back to themselves, but a value ending in `\` or a range with one
+/// exclusive bound may not.
+impl std::fmt::Display for Predicate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fn grouped(p: &Predicate, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match p {
+                Predicate::And(ps) | Predicate::Or(ps) if ps.len() > 1 => write!(f, "({p})"),
+                _ => write!(f, "{p}"),
+            }
+        }
+        fn joined(
+            ps: &[Predicate],
+            sep: &str,
+            f: &mut std::fmt::Formatter<'_>,
+        ) -> std::fmt::Result {
+            for (i, p) in ps.iter().enumerate() {
+                if i > 0 {
+                    f.write_str(sep)?;
+                }
+                grouped(p, f)?;
+            }
+            Ok(())
+        }
+        match self {
+            Predicate::True => f.write_str("*"),
+            Predicate::And(ps) if ps.is_empty() => f.write_str("*"),
+            Predicate::Or(ps) if ps.is_empty() => f.write_str("NOT *"),
+            Predicate::And(ps) => joined(ps, " AND ", f),
+            Predicate::Or(ps) => joined(ps, " OR ", f),
+            Predicate::Not(p) => {
+                f.write_str("NOT ")?;
+                grouped(p, f)
+            }
+            Predicate::Text(term) => f.write_str(&quote(term)),
+            Predicate::Field { field, op } => match op.as_ref() {
+                FieldOp::Exists => write!(f, "{field}:*"),
+                FieldOp::Eq(lit) => write!(f, "{field}:{}", quote(&lit.text)),
+                FieldOp::In(lits) => {
+                    write!(f, "{field}:(")?;
+                    for (i, lit) in lits.iter().enumerate() {
+                        if i > 0 {
+                            f.write_str(" OR ")?;
+                        }
+                        f.write_str(&quote(&lit.text))?;
+                    }
+                    f.write_str(")")
+                }
+                FieldOp::Wildcard(p) => write!(f, "{field}:{}", quote(p.as_str())),
+                FieldOp::Cidr(c) => write!(f, "{field}:{c}"),
+                FieldOp::ContainsAny(subs) => {
+                    let items: Vec<String> = subs
+                        .needles()
+                        .iter()
+                        .map(|n| format!("{field}:{}", quote(&format!("*{n}*"))))
+                        .collect();
+                    match items.len() {
+                        0 => f.write_str("NOT *"),
+                        1 => f.write_str(&items[0]),
+                        _ => write!(f, "({})", items.join(" OR ")),
+                    }
+                }
+                FieldOp::Range { lower, upper } => match (lower, upper) {
+                    (Some((lo, true)), Some((hi, true))) => {
+                        write!(f, "{field}:{}..{}", quote(&lo.text), quote(&hi.text))
+                    }
+                    _ => {
+                        let mut parts = Vec::new();
+                        if let Some((lo, inc)) = lower {
+                            let op = if *inc { ">=" } else { ">" };
+                            parts.push(format!("{field}{op}{}", quote(&lo.text)));
+                        }
+                        if let Some((hi, inc)) = upper {
+                            let op = if *inc { "<=" } else { "<" };
+                            parts.push(format!("{field}{op}{}", quote(&hi.text)));
+                        }
+                        f.write_str(&parts.join(" AND "))
+                    }
+                },
+            },
+        }
+    }
+}
+
+/// A value as query text: quoted when it holds spaces or syntax.
+fn quote(text: &str) -> String {
+    let plain = !text.is_empty()
+        && !matches!(text, "AND" | "OR" | "NOT")
+        && !text.contains(|c: char| {
+            c.is_whitespace() || matches!(c, ':' | '(' | ')' | '"' | '<' | '>' | '=' | '!')
+        });
+    if plain {
+        text.to_string()
+    } else {
+        format!("\"{}\"", text.replace('"', "\\\""))
     }
 }
 
@@ -131,6 +234,11 @@ impl FieldOp {
                 FieldValue::Ip(ip) => cidr.contains(ip),
                 FieldValue::Str(s) => Ip::from_str(s).is_ok_and(|ip| cidr.contains(&ip)),
                 _ => false,
+            },
+            FieldOp::ContainsAny(subs) => match value {
+                FieldValue::Str(s) => subs.matches(s),
+                FieldValue::Object(_) | FieldValue::Bytes(_) => false,
+                other => subs.matches(&other.to_string()),
             },
         }
     }
@@ -310,6 +418,10 @@ pub fn parse_time(text: &str) -> Option<Timestamp> {
 pub struct Pattern {
     source: String,
     chars: Vec<char>,
+    /// The lowercased glob as bytes, when it is ASCII: ASCII text then
+    /// matches without lowercasing or allocating (detection rules run
+    /// hundreds of these per event).
+    ascii: Option<Vec<u8>>,
 }
 
 impl Pattern {
@@ -317,6 +429,9 @@ impl Pattern {
         Pattern {
             source: glob.to_string(),
             chars: glob.to_lowercase().chars().collect(),
+            ascii: glob
+                .is_ascii()
+                .then(|| glob.to_ascii_lowercase().into_bytes()),
         }
     }
 
@@ -329,6 +444,11 @@ impl Pattern {
     }
 
     pub fn matches(&self, text: &str) -> bool {
+        if let Some(p) = &self.ascii
+            && text.is_ascii()
+        {
+            return glob_ascii(p, text.as_bytes());
+        }
         let text: Vec<char> = text.to_lowercase().chars().collect();
         let p = &self.chars;
         // Iterative glob matching with single-star backtracking.
@@ -351,6 +471,128 @@ impl Pattern {
         }
         p[i..].iter().all(|c| *c == '*')
     }
+}
+
+/// A set of substrings searched case-insensitively in one pass
+/// (Aho-Corasick), for [`FieldOp::ContainsAny`].
+#[derive(Clone)]
+pub struct Substrings {
+    /// As given.
+    needles: Vec<String>,
+    automaton: aho_corasick::AhoCorasick,
+    /// Every needle is ASCII: ASCII text is searched as is.
+    ascii: bool,
+}
+
+impl Substrings {
+    /// `Err` only when the set is too large for the automaton.
+    pub fn new<S: AsRef<str>>(needles: impl IntoIterator<Item = S>) -> Result<Substrings, String> {
+        let needles: Vec<String> = needles
+            .into_iter()
+            .map(|n| n.as_ref().to_string())
+            .collect();
+        let ascii = needles.iter().all(|n| n.is_ascii());
+        // ASCII needles match case-insensitively as they are; others are
+        // lowercased and searched in lowercased text.
+        let lowered: Vec<String> = needles.iter().map(|n| n.to_lowercase()).collect();
+        let automaton = aho_corasick::AhoCorasick::builder()
+            .ascii_case_insensitive(ascii)
+            .build(&lowered)
+            .map_err(|e| e.to_string())?;
+        Ok(Substrings {
+            needles,
+            automaton,
+            ascii,
+        })
+    }
+
+    pub fn needles(&self) -> &[String] {
+        &self.needles
+    }
+
+    /// Same answer as `Pattern::new("*n*").matches(text)` for any needle.
+    pub fn matches(&self, text: &str) -> bool {
+        if self.ascii && text.is_ascii() {
+            self.automaton.is_match(text)
+        } else {
+            self.automaton.is_match(&text.to_lowercase())
+        }
+    }
+}
+
+impl PartialEq for Substrings {
+    fn eq(&self, other: &Self) -> bool {
+        self.needles == other.needles
+    }
+}
+
+impl std::fmt::Debug for Substrings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("Substrings").field(&self.needles).finish()
+    }
+}
+
+/// [`Pattern::matches`] on ASCII: `p` is lowercased, `text` is not.
+fn glob_ascii(p: &[u8], text: &[u8]) -> bool {
+    // Fast paths for the shapes rules use most: `*lit*`, `lit*`, `*lit`.
+    let inner = |s: &[u8]| !s.contains(&b'*') && !s.contains(&b'?');
+    match p {
+        [b'*', mid @ .., b'*'] if inner(mid) => return contains_ascii(text, mid),
+        [b'*', tail @ ..] if inner(tail) => {
+            return text.len() >= tail.len()
+                && text[text.len() - tail.len()..].eq_ignore_ascii_case(tail);
+        }
+        [head @ .., b'*'] if inner(head) => {
+            return text.len() >= head.len() && text[..head.len()].eq_ignore_ascii_case(head);
+        }
+        _ => {}
+    }
+    let (mut t, mut i) = (0usize, 0usize);
+    let mut star: Option<(usize, usize)> = None;
+    while t < text.len() {
+        if i < p.len() && (p[i] == b'?' || p[i] == text[t].to_ascii_lowercase()) {
+            i += 1;
+            t += 1;
+        } else if i < p.len() && p[i] == b'*' {
+            star = Some((i, t));
+            i += 1;
+        } else if let Some((si, st)) = star {
+            i = si + 1;
+            t = st + 1;
+            star = Some((si, st + 1));
+        } else {
+            return false;
+        }
+    }
+    p[i..].iter().all(|c| *c == b'*')
+}
+
+/// Case-insensitive substring search; `needle` is lowercased.
+fn contains_ascii(haystack: &[u8], needle: &[u8]) -> bool {
+    let Some((&first, rest)) = needle.split_first() else {
+        return true;
+    };
+    if haystack.len() < needle.len() {
+        return false;
+    }
+    let upper = first.to_ascii_uppercase();
+    let last_start = haystack.len() - needle.len();
+    let mut i = 0;
+    while i <= last_start {
+        // Skip to the next byte equal to `first` in either case.
+        match haystack[i..=last_start]
+            .iter()
+            .position(|&b| b == first || b == upper)
+        {
+            None => return false,
+            Some(off) => i += off,
+        }
+        if haystack[i + 1..i + needle.len()].eq_ignore_ascii_case(rest) {
+            return true;
+        }
+        i += 1;
+    }
+    false
 }
 
 /// An IPv4 or IPv6 network in CIDR notation.
@@ -502,6 +744,75 @@ mod tests {
         assert!(!Pattern::new("a*b*c").matches("aXXbYY"));
         assert!(Pattern::new("?b").matches("ab"));
         assert!(Pattern::new("**x").matches("abcx"));
+    }
+
+    #[test]
+    fn ascii_glob_agrees_with_the_general_one() {
+        let patterns = [
+            "*",
+            "**",
+            "",
+            "a",
+            "A*",
+            "*a",
+            "*ab*",
+            "*AB*",
+            "a*b",
+            "a?c",
+            "*a?c*",
+            "?",
+            "??",
+            "*x*y*",
+            "*/bin/sh*",
+            "*-s*",
+            "abc",
+            "*bc",
+            "ab*",
+            "*aab*",
+        ];
+        let texts = [
+            "",
+            "a",
+            "A",
+            "ab",
+            "AB",
+            "abc",
+            "xaabz",
+            "aac",
+            "x/BIN/sh -i",
+            "--s",
+            "xy",
+            "yx",
+            "x y",
+            "ba",
+            "aaab",
+        ];
+        for p in patterns {
+            let pat = Pattern::new(p);
+            let general = Pattern {
+                ascii: None,
+                ..pat.clone()
+            };
+            for t in texts {
+                assert_eq!(pat.matches(t), general.matches(t), "{p:?} on {t:?}");
+            }
+        }
+        // Substrings agree with `*n*` globs.
+        let needles = ["ab", "-S", "/bin/sh", "x y", ""];
+        for set in [&needles[..1], &needles[1..4], &needles[4..]] {
+            let subs = Substrings::new(set).unwrap();
+            for t in texts.iter().chain(&["CAFÉ -s", "é/BIN/SH"]) {
+                let any = set
+                    .iter()
+                    .any(|n| Pattern::new(&format!("*{n}*")).matches(t));
+                assert_eq!(subs.matches(t), any, "{set:?} on {t:?}");
+            }
+        }
+        let accents = Substrings::new(["É"]).unwrap();
+        assert!(accents.matches("café") && accents.matches("CAFÉ") && !accents.matches("cafe"));
+        // Non-ASCII text takes the general path.
+        assert!(Pattern::new("*É*").matches("cafÉ"));
+        assert!(Pattern::new("*é*").matches("CAFÉ"));
     }
 
     #[test]

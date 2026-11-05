@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::store::jsonl::JsonlStore;
-use crate::store::{Pattern, TimeRange};
+use crate::store::{Pattern, Substrings, TimeRange};
 use crate::test_util::TempDir;
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -261,7 +261,7 @@ fn literal(rng: &mut Rng) -> Literal {
 }
 
 fn random_op(rng: &mut Rng) -> FieldOp {
-    match rng.below(6) {
+    match rng.below(7) {
         0 => FieldOp::Exists,
         1 => FieldOp::Eq(literal(rng)),
         2 => FieldOp::In(vec![literal(rng), literal(rng)]),
@@ -270,7 +270,8 @@ fn random_op(rng: &mut Rng) -> FieldOp {
             lower: rng.chance(70).then(|| (literal(rng), rng.chance(50))),
             upper: rng.chance(70).then(|| (literal(rng), rng.chance(50))),
         },
-        _ => FieldOp::Cidr(Cidr::parse(rng.pick(&CIDRS)).unwrap()),
+        5 => FieldOp::Cidr(Cidr::parse(rng.pick(&CIDRS)).unwrap()),
+        _ => FieldOp::ContainsAny(Substrings::new([*rng.pick(&TERMS), *rng.pick(&TERMS)]).unwrap()),
     }
 }
 

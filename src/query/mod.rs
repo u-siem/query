@@ -40,6 +40,7 @@
 
 pub mod exec;
 pub mod parser;
+pub mod stream;
 
 use crate::store::{Predicate, TimeRange};
 
@@ -47,6 +48,7 @@ pub use exec::{
     ExecError, ExecOptions, NoVirtualFields, QueryResult, ResultRows, VirtualFields, execute,
 };
 pub use parser::{ParseError, parse};
+pub use stream::{StreamFilter, StreamFilterError};
 
 /// A parsed query.
 #[derive(Debug, Clone, Default, PartialEq)]
