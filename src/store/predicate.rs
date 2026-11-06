@@ -280,6 +280,61 @@ pub fn lookup<'a>(event: &'a Event, path: &str) -> Option<Cow<'a, FieldValue>> {
     None
 }
 
+/// An event read through [`lookup`], minus its slow path: a dotted name
+/// that isn't a flat field probes every dotted prefix for an `Object`,
+/// which costs several hash lookups per missing field. Events without any
+/// `Object` value (most parsed logs) can skip that. Whether there is one is
+/// found out on the first miss, once.
+pub struct FlatLookup<'a> {
+    event: &'a Event,
+    nested: std::cell::Cell<Option<bool>>,
+}
+
+impl<'a> FlatLookup<'a> {
+    pub fn new(event: &'a Event) -> FlatLookup<'a> {
+        FlatLookup {
+            event,
+            nested: std::cell::Cell::new(None),
+        }
+    }
+
+    pub fn event(&self) -> &'a Event {
+        self.event
+    }
+
+    fn nested(&self) -> bool {
+        match self.nested.get() {
+            Some(nested) => nested,
+            None => {
+                let nested = self
+                    .event
+                    .fields()
+                    .values()
+                    .any(|v| matches!(v, FieldValue::Object(_)));
+                self.nested.set(Some(nested));
+                nested
+            }
+        }
+    }
+}
+
+impl Record for FlatLookup<'_> {
+    fn get(&self, field: &str) -> Option<Cow<'_, FieldValue>> {
+        if field.starts_with('@') {
+            return lookup(self.event, field);
+        }
+        match self.event.get_field(field) {
+            Some(value) => Some(Cow::Borrowed(value)),
+            None if self.nested() => lookup(self.event, field),
+            None => None,
+        }
+    }
+
+    fn for_each_value(&self, f: &mut dyn FnMut(&FieldValue)) {
+        self.event.for_each_value(f)
+    }
+}
+
 /// Total order for sorting mixed values: numbers numerically, times
 /// chronologically, IPs by address, everything else as case-insensitive text.
 pub fn compare_values(a: &FieldValue, b: &FieldValue) -> std::cmp::Ordering {
@@ -346,6 +401,38 @@ impl Literal {
 
     pub fn as_time(&self) -> Option<Timestamp> {
         self.time
+    }
+
+    /// Lowercased text, the form text equality compares against.
+    pub fn lower(&self) -> &str {
+        &self.lower
+    }
+
+    /// The literal reads only as text (not as a number, boolean, address or
+    /// time), so it can equal only string values: case-insensitively, as
+    /// [`Literal::lower`].
+    pub fn is_text_only(&self) -> bool {
+        self.int.is_none()
+            && self.float.is_none()
+            && self.boolean.is_none()
+            && self.ip.is_none()
+            && self.time.is_none()
+    }
+
+    /// The integer this literal equals, when it reads as text or as that
+    /// integer and nothing else (no boolean, address or time reading), and
+    /// the integer is exact as a float (|n| < 2^53). Such a literal equals a
+    /// string value whose lowercase is [`Literal::lower`], or a number value
+    /// equal to `n`, and nothing else.
+    pub fn exact_int(&self) -> Option<i64> {
+        const EXACT: i128 = 1 << 53;
+        let n = self.int?;
+        let exact = n.abs() < EXACT
+            && self.float == Some(n as f64)
+            && self.boolean.is_none()
+            && self.ip.is_none()
+            && self.time.is_none();
+        exact.then_some(n as i64)
     }
 
     fn equals(&self, value: &FieldValue) -> bool {

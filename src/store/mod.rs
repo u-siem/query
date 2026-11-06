@@ -26,7 +26,8 @@ use std::fmt;
 use usiem::event::{FieldValue, Timestamp};
 
 pub use predicate::{
-    Cidr, FieldOp, Literal, Pattern, Predicate, Record, Substrings, compare_values, lookup,
+    Cidr, FieldOp, FlatLookup, Literal, Pattern, Predicate, Record, Substrings, compare_values,
+    lookup,
 };
 
 #[derive(Debug)]

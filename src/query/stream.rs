@@ -70,6 +70,16 @@ impl StreamFilter {
         &self.filter
     }
 
+    /// The time range the filter requires of `@timestamp`.
+    pub fn time(&self) -> &TimeRange {
+        &self.time
+    }
+
+    /// The `| where` stages.
+    pub fn wheres(&self) -> &[Predicate] {
+        &self.wheres
+    }
+
     /// Matches everything.
     pub fn all() -> StreamFilter {
         StreamFilter {
