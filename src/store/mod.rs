@@ -68,6 +68,9 @@ pub struct AppendAck {
     pub appended: usize,
     /// Events in the store after this call.
     pub total: u64,
+    /// Everything appended so far (this batch included) is already on
+    /// stable storage; when `false`, call [`EventStore::sync`] for that.
+    pub synced: bool,
 }
 
 /// Half-open interval `[start, end)` on `original_time`. `None` is unbounded.
@@ -149,6 +152,10 @@ pub trait EventSource: Send + Sync {
 /// Append-only event storage, read and written through one handle.
 pub trait EventStore: EventSource {
     fn append(&mut self, batch: Vec<Event>) -> Result<AppendAck, StoreError>;
+
+    /// Makes every event appended so far durable: once this returns, they
+    /// survive a crash or power loss. Cheap when nothing is pending.
+    fn sync(&mut self) -> Result<(), StoreError>;
 
     /// Ends an ingest run: flushes and persists metadata. Appending again
     /// afterwards is allowed.

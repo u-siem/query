@@ -168,7 +168,16 @@ impl EventStore for JsonlStore {
         Ok(AppendAck {
             appended,
             total: self.len(),
+            synced: false,
         })
+    }
+
+    fn sync(&mut self) -> Result<(), StoreError> {
+        if let Some(w) = self.writer.as_mut() {
+            w.flush()?;
+            w.get_ref().sync_data()?;
+        }
+        Ok(())
     }
 
     fn seal(&mut self) -> Result<(), StoreError> {
@@ -315,9 +324,11 @@ mod tests {
                 ack,
                 AppendAck {
                     appended: 3,
-                    total: 3
+                    total: 3,
+                    synced: false,
                 }
             );
+            store.sync().unwrap();
             store.seal().unwrap();
         }
         let store = JsonlStore::open(tmp.path()).unwrap();

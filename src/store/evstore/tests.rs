@@ -546,6 +546,25 @@ fn differential_against_jsonl() {
 }
 
 #[test]
+fn sync_makes_appends_durable() {
+    let dir = TempDir::new("sync");
+    let mut rng = Rng(11);
+    {
+        let mut evs = EvstoreSource::open(dir.path()).unwrap();
+        let ack = evs
+            .append((0..20).map(|i| random_event(&mut rng, i)).collect())
+            .unwrap();
+        assert_eq!(ack.appended, 20);
+        evs.sync().unwrap();
+        // Nothing pending: a second sync is a no-op.
+        evs.sync().unwrap();
+        // Dropped without seal or maintain: only the synced WAL remains.
+    }
+    let evs = EvstoreSource::open(dir.path()).unwrap();
+    assert_eq!(evs.len(), 20);
+}
+
+#[test]
 fn catalog_rebuilds_after_unflushed_appends() {
     let dir = TempDir::new("diff-catalog");
     let mut rng = Rng(7);

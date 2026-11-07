@@ -501,7 +501,12 @@ impl EventStore for EvstoreSource {
         Ok(AppendAck {
             appended: ack.appended,
             total: ack.total,
+            synced: ack.synced,
         })
+    }
+
+    fn sync(&mut self) -> Result<(), StoreError> {
+        self.store.sync().map_err(ev_err)
     }
 
     fn seal(&mut self) -> Result<(), StoreError> {
