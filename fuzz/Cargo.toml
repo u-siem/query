@@ -1,0 +1,31 @@
+[package]
+name = "usiem-query-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+usiem = { git = "https://github.com/u-siem/usiem", rev = "853e48b0900612e2cce0ba750adb38d9bb6c2650", features = ["serde"] }
+usiem-query = { path = "..", default-features = false }
+
+# Not part of the crate's (non-existent) workspace.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "query_parse"
+path = "fuzz_targets/query_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "literals"
+path = "fuzz_targets/literals.rs"
+test = false
+doc = false
+bench = false

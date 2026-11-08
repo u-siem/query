@@ -4,44 +4,115 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
 
 jobs:
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: Clippy (${{ matrix.features.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features:
+          - { name: none, flags: "--no-default-features" }
+          - { name: default, flags: "" }
+          - { name: evstore, flags: "--features evstore" }
+          - { name: all, flags: "--all-features" }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.features.name }}
+      - run: cargo clippy --locked --all-targets ${{ matrix.features.flags }} -- -D warnings
+
   test:
-    # The store must behave identically on every platform (file locking,
-    # fsync semantics, mmap and deletion rules differ), so test on all three.
-    name: Build & test (${{ matrix.os }})
+    # Store backends touch the file system, whose rules differ per platform.
+    name: Test (${{ matrix.os }}, ${{ matrix.features.name }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
+        features:
+          - { name: none, flags: "--no-default-features" }
+          - { name: default, flags: "" }
+          - { name: evstore, flags: "--features evstore" }
+          - { name: all, flags: "--all-features" }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --all-features
-      - run: cargo test --all-features
+        with:
+          key: ${{ matrix.features.name }}
+      - run: cargo test --locked ${{ matrix.features.flags }}
 
-  fmt:
-    name: Format check
+  msrv:
+    name: MSRV (1.89)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v7
+      # A branch ref plus `toolchain`: Dependabot would read `@1.89` as an
+      # action version and bump it.
+      - uses: dtolnay/rust-toolchain@master
         with:
-          components: rustfmt
-      - run: cargo fmt --all -- --check
-
-  clippy:
-    name: Clippy
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
+          toolchain: "1.89"
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --all-features --all-targets
+      - run: cargo test --locked --all-features
+
+  docs:
+    name: Docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # Nightly, for `--cfg docsrs` (feature badges).
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo doc --locked --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: --cfg docsrs -D warnings
+
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories bans licenses sources
+
+  semver:
+    name: Semver
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: obi1kenobi/cargo-semver-checks-action@v2
+        with:
+          baseline-rev: ${{ github.event.pull_request.base.sha }}
+          feature-group: all-features
