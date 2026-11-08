@@ -47,28 +47,40 @@ use crate::store::{Predicate, TimeRange};
 pub use exec::{
     ExecError, ExecOptions, NoVirtualFields, QueryResult, ResultRows, VirtualFields, execute,
 };
-pub use parser::{ParseError, parse};
+pub use parser::{MAX_NESTING, ParseError, parse};
 pub use stream::{StreamFilter, StreamFilterError};
 
 /// A parsed query.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Query {
+    /// The search before the first `|`, without `earliest=`/`latest=`.
     pub filter: Predicate,
+    /// `earliest=` and `latest=`.
     pub time: TimeRange,
+    /// The pipe commands, in order.
     pub commands: Vec<Command>,
 }
 
+/// A pipe command.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
+    /// `where <filter>`: keeps the rows that match.
     Where(Predicate),
     /// Projection: which columns to show, in order.
     Fields(Vec<String>),
+    /// `sort -a +b`: orders rows by these keys.
     Sort(Vec<SortKey>),
+    /// `head n`: the first `n` rows.
     Head(usize),
+    /// `tail n`: the last `n` rows.
     Tail(usize),
+    /// `dedup a b`: the first row per distinct combination of values.
     Dedup(Vec<String>),
+    /// `stats <aggs> by <keys>`: one row per group.
     Stats {
+        /// Aggregates, one output column each.
         aggs: Vec<Agg>,
+        /// Group keys; empty for a single overall row.
         by: Vec<GroupKey>,
     },
 }
@@ -76,10 +88,13 @@ pub enum Command {
 /// A `stats ... by` term.
 #[derive(Debug, Clone, PartialEq)]
 pub enum GroupKey {
+    /// A field's value.
     Field(String),
     /// `bucket(field,span)`: the value floored to a multiple of `span`.
     Bucket {
+        /// The bucketed field.
         field: String,
+        /// Bucket width.
         span: Span,
         /// Column name: the term as written.
         name: String,
@@ -87,12 +102,14 @@ pub enum GroupKey {
 }
 
 impl GroupKey {
+    /// The field the key reads.
     pub fn field(&self) -> &str {
         match self {
             GroupKey::Field(f) | GroupKey::Bucket { field: f, .. } => f,
         }
     }
 
+    /// The output column name.
     pub fn name(&self) -> &str {
         match self {
             GroupKey::Field(f) => f,
@@ -105,11 +122,14 @@ impl GroupKey {
 /// number for numbers.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Span {
+    /// A duration, for time values.
     Nanos(i64),
+    /// A width, for numeric values.
     Number(f64),
 }
 
 impl Span {
+    /// Parses a positive number or duration; `None` otherwise.
     pub fn parse(text: &str) -> Option<Span> {
         if let Ok(n) = text.parse::<f64>() {
             return (n > 0.0 && n.is_finite()).then_some(Span::Number(n));
@@ -119,7 +139,8 @@ impl Span {
     }
 }
 
-/// Parses `30s`, `-15m`, `1h`, `2d` into nanoseconds.
+/// Parses `30s`, `-15m`, `1h`, `2d` into nanoseconds, saturating at the
+/// `i64` range.
 pub fn parse_duration(text: &str) -> Option<i64> {
     let unit = text.chars().last()?;
     let count: i64 = text[..text.len() - unit.len_utf8()].parse().ok()?;
@@ -133,25 +154,38 @@ pub fn parse_duration(text: &str) -> Option<i64> {
     Some(count.saturating_mul(unit_nanos))
 }
 
+/// One `sort` key.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SortKey {
+    /// The field or column sorted by.
     pub field: String,
+    /// `-field`: largest first.
     pub descending: bool,
 }
 
+/// A `stats` aggregate function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AggFunc {
+    /// `count` (rows) or `count(f)` (rows with `f`).
     Count,
+    /// `dc(f)`: distinct values.
     DistinctCount,
+    /// `min(f)`, by [`compare_values`](crate::store::compare_values).
     Min,
+    /// `max(f)`, by [`compare_values`](crate::store::compare_values).
     Max,
+    /// `sum(f)` of numeric values.
     Sum,
+    /// `avg(f)` of numeric values.
     Avg,
+    /// `values(f)`: up to 100 distinct values, sorted.
     Values,
 }
 
+/// One `stats` aggregate.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Agg {
+    /// The function.
     pub func: AggFunc,
     /// `None` only for a bare `count`.
     pub field: Option<String>,

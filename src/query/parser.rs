@@ -9,7 +9,9 @@ use usiem::event::Timestamp;
 /// A syntax error. `pos` is a byte offset into the query text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError {
+    /// Byte offset of the problem in the query text.
     pub pos: usize,
+    /// What is wrong, for people.
     pub message: String,
 }
 
@@ -23,6 +25,11 @@ impl std::error::Error for ParseError {}
 
 type Result<T> = std::result::Result<T, ParseError>;
 
+/// How deeply parentheses and `NOT`s may nest. The parser, the evaluator and
+/// `Drop` all recurse over the predicate tree, so untrusted query text must
+/// not be able to grow it deep enough to overflow the stack.
+pub const MAX_NESTING: usize = 64;
+
 /// `now`, or a duration before now: `-15m`, `-24h`, `-7d`.
 fn relative_time(text: &str) -> Option<Timestamp> {
     let now = Timestamp::now();
@@ -33,6 +40,13 @@ fn relative_time(text: &str) -> Option<Timestamp> {
     (ago >= 0).then(|| Timestamp(now.as_nanos().saturating_sub(ago)))
 }
 
+/// Parses a query: a filter, then `|`-separated commands.
+///
+/// # Errors
+///
+/// A [`ParseError`] pointing at the first problem: a syntax error, an
+/// unknown command or aggregation, a bad time or span, or nesting deeper
+/// than [`MAX_NESTING`].
 pub fn parse(input: &str) -> Result<Query> {
     let segments = split_pipes(input)?;
     let (search_start, search) = segments[0];
@@ -112,6 +126,8 @@ struct FilterParser<'a> {
     /// `earliest=`/`latest=` are only allowed in the leading search.
     allow_time: bool,
     time: TimeRange,
+    /// Open parentheses and `NOT`s around the current position.
+    depth: usize,
 }
 
 impl<'a> FilterParser<'a> {
@@ -122,6 +138,7 @@ impl<'a> FilterParser<'a> {
             base,
             allow_time,
             time: TimeRange::default(),
+            depth: 0,
         }
     }
 
@@ -130,6 +147,17 @@ impl<'a> FilterParser<'a> {
             pos: self.base + self.pos,
             message: message.into(),
         })
+    }
+
+    /// Enters one more level of nesting.
+    fn nest(&mut self) -> Result<()> {
+        if self.depth >= MAX_NESTING {
+            return self.error(format!(
+                "the query nests too deeply (more than {MAX_NESTING} levels of '(' and NOT)"
+            ));
+        }
+        self.depth += 1;
+        Ok(())
     }
 
     fn rest(&self) -> &'a str {
@@ -190,7 +218,7 @@ impl<'a> FilterParser<'a> {
             items.push(self.parse_and()?);
         }
         Ok(if items.len() == 1 {
-            items.pop().unwrap()
+            items.swap_remove(0)
         } else {
             Predicate::Or(items)
         })
@@ -224,14 +252,17 @@ impl<'a> FilterParser<'a> {
         }
         Ok(match items.len() {
             0 => Predicate::True,
-            1 => items.pop().unwrap(),
+            1 => items.swap_remove(0),
             _ => Predicate::And(items),
         })
     }
 
     fn parse_unary(&mut self) -> Result<Predicate> {
         if self.eat_keyword("NOT") {
-            return Ok(Predicate::Not(Box::new(self.parse_unary()?)));
+            self.nest()?;
+            let inner = self.parse_unary()?;
+            self.depth -= 1;
+            return Ok(Predicate::Not(Box::new(inner)));
         }
         self.parse_primary()
     }
@@ -239,11 +270,13 @@ impl<'a> FilterParser<'a> {
     fn parse_primary(&mut self) -> Result<Predicate> {
         self.skip_ws();
         if self.eat("(") {
+            self.nest()?;
             let inner = self.parse_or()?;
             self.skip_ws();
             if !self.eat(")") {
                 return self.error("expected ')'");
             }
+            self.depth -= 1;
             return Ok(inner);
         }
         if self.peek() == Some('"') {
@@ -557,7 +590,7 @@ fn parse_stats(args: &str) -> std::result::Result<Command, String> {
         if word == "as" {
             let alias = iter.next().ok_or("'as' expects a name")?;
             let last = aggs.last_mut().ok_or("'as' must follow an aggregation")?;
-            last.name = alias.clone();
+            last.name.clone_from(alias);
             continue;
         }
         aggs.push(parse_agg(word)?);
@@ -876,5 +909,69 @@ mod tests {
         assert!(parse("* | stats count by").is_err());
         assert!(parse("* | head x").is_err());
         assert!(parse("a:1 )").is_err());
+    }
+
+    #[test]
+    fn deep_nesting_is_an_error_not_a_stack_overflow() {
+        for open in ["(", "NOT ", "a:1 OR (", "NOT ("] {
+            let deep = open.repeat(100_000);
+            let e = parse(&deep).unwrap_err();
+            assert!(e.message.contains("nests too deeply"), "{open:?}: {e}");
+            let e = parse(&format!("* | where {deep}")).unwrap_err();
+            assert!(e.message.contains("nests too deeply"), "{open:?}: {e}");
+        }
+        // Up to the limit is fine, and the depth resets between groups.
+        let ok = format!("{}a:1{}", "(".repeat(MAX_NESTING), ")".repeat(MAX_NESTING));
+        assert_eq!(parse(&ok).unwrap().filter, eq("a", "1"));
+        let siblings = "(a:1) ".repeat(MAX_NESTING * 4);
+        assert!(parse(&siblings).is_ok());
+        let nots = format!("{}a:1", "NOT ".repeat(MAX_NESTING));
+        assert!(parse(&nots).is_ok());
+        assert!(parse(&format!("NOT {nots}")).is_err());
+    }
+
+    #[test]
+    fn odd_text_and_huge_numbers_do_not_panic() {
+        for q in [
+            "é",
+            "a:é",
+            "😀:😀",
+            r#"a:"é\"""#,
+            "a\u{3000}:b",
+            "* |\u{3000}head",
+            "* | head 99999999999999999999999",
+            "* | tail 18446744073709551615",
+            "* | stats count by bucket(@timestamp,99999999999d)",
+            "* | stats count by bucket(f,1e-300)",
+            "f:170141183460469231731687303715884105728",
+            "f:-170141183460469231731687303715884105728",
+            "f:1..",
+            "f:..",
+            "f:/",
+            "f:1.2.3.4/999",
+            "f:\"::\"/129",
+            "f:é/8",
+            "\"",
+            r#"\""#,
+            "(",
+            ")",
+            "|",
+            "a:(",
+            r#"a:("x""#,
+            "NOT",
+            "AND OR",
+            "earliest=-é",
+            "earliest=-5é",
+        ] {
+            let _ = parse(q);
+        }
+    }
+
+    #[test]
+    fn huge_relative_times_saturate() {
+        let q = parse("earliest=-99999999999d latest=-9223372036854775807d").unwrap();
+        assert!(q.time.start.is_some() && q.time.end.is_some());
+        assert!(parse("earliest=--5d").is_err());
+        assert!(parse("earliest=-d").is_err());
     }
 }

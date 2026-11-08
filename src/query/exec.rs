@@ -36,6 +36,7 @@ pub trait VirtualFields: Sync {
 }
 
 /// Resolves nothing.
+#[derive(Debug, Clone, Copy, Default)]
 pub struct NoVirtualFields;
 
 impl VirtualFields for NoVirtualFields {
@@ -44,6 +45,7 @@ impl VirtualFields for NoVirtualFields {
     }
 }
 
+/// Limits and settings for [`execute`].
 #[derive(Debug, Clone)]
 pub struct ExecOptions {
     /// Rows kept in the final result; the rest is dropped and
@@ -69,10 +71,16 @@ impl Default for ExecOptions {
     }
 }
 
+/// Why a query could not run to the end.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum ExecError {
+    /// The storage backend failed.
     Store(StoreError),
+    /// [`ExecOptions::cancel`] was set.
     Cancelled,
+    /// `sort` would hold more than this many events
+    /// ([`ExecOptions::max_materialized`]).
     TooManyEvents(usize),
 }
 
@@ -89,7 +97,14 @@ impl fmt::Display for ExecError {
     }
 }
 
-impl std::error::Error for ExecError {}
+impl std::error::Error for ExecError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ExecError::Store(e) => Some(e),
+            ExecError::Cancelled | ExecError::TooManyEvents(_) => None,
+        }
+    }
+}
 
 impl From<StoreError> for ExecError {
     fn from(e: StoreError) -> Self {
@@ -97,26 +112,36 @@ impl From<StoreError> for ExecError {
     }
 }
 
+/// The rows a query produced.
 #[derive(Debug, Clone)]
 pub enum ResultRows {
+    /// Events, when no `stats` ran.
     Events(Vec<Event>),
+    /// A table, after `stats`: named columns and one value (or none) per
+    /// column in each row.
     Table {
+        /// Column names, in order.
         columns: Vec<String>,
+        /// Rows, each as long as `columns`.
         rows: Vec<Vec<Option<FieldValue>>>,
     },
 }
 
+/// What [`execute`] returns.
 #[derive(Debug, Clone)]
 pub struct QueryResult {
+    /// The result rows.
     pub rows: ResultRows,
     /// Columns chosen with `fields` (events only; tables carry their own).
     pub projection: Option<Vec<String>>,
     /// More rows existed than [`ExecOptions::max_rows`].
     pub truncated: bool,
+    /// Wall time the query took.
     pub elapsed: Duration,
 }
 
 impl QueryResult {
+    /// Number of rows (events or table rows).
     pub fn len(&self) -> usize {
         match &self.rows {
             ResultRows::Events(events) => events.len(),
@@ -124,6 +149,7 @@ impl QueryResult {
         }
     }
 
+    /// Whether there are no rows.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -131,8 +157,18 @@ impl QueryResult {
 
 /// An event seen through its virtual fields.
 pub struct EnrichedEvent<'a> {
+    /// The stored event.
     pub event: &'a Event,
+    /// Resolves the event's `base@attr` fields.
     pub virtual_fields: &'a dyn VirtualFields,
+}
+
+impl fmt::Debug for EnrichedEvent<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EnrichedEvent")
+            .field("event", self.event)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Record for EnrichedEvent<'_> {
@@ -147,35 +183,42 @@ impl Record for EnrichedEvent<'_> {
     }
 
     fn for_each_value(&self, f: &mut dyn FnMut(&FieldValue)) {
-        self.event.for_each_value(f)
+        self.event.for_each_value(f);
     }
 }
 
 /// One row of a table result.
+#[derive(Debug, Clone, Copy)]
 pub struct TableRow<'a> {
+    /// The table's column names.
     pub columns: &'a [String],
+    /// This row's values, one per column.
     pub values: &'a [Option<FieldValue>],
 }
 
 impl Record for TableRow<'_> {
     fn get(&self, field: &str) -> Option<Cow<'_, FieldValue>> {
         let index = self.columns.iter().position(|c| c == field)?;
-        self.values[index].as_ref().map(Cow::Borrowed)
+        self.values.get(index)?.as_ref().map(Cow::Borrowed)
     }
 
     fn for_each_value(&self, f: &mut dyn FnMut(&FieldValue)) {
-        self.values.iter().flatten().for_each(f)
+        self.values.iter().flatten().for_each(f);
     }
 }
 
 /// What gets sent to the store, and what's left to do here.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Plan {
+    /// What the backend evaluates.
     pub store: StoreQuery,
+    /// Filter conjuncts on virtual fields, evaluated here.
     pub residual: Predicate,
+    /// Commands left to run here, in order.
     pub commands: Vec<Command>,
 }
 
+/// [`plan_with_order`] with oldest-first events.
 pub fn plan(query: &Query) -> Plan {
     plan_with_order(query, Order::TimeAsc)
 }
@@ -239,7 +282,7 @@ fn conjunction(mut items: Vec<Predicate>) -> Predicate {
     items.retain(|p| *p != Predicate::True);
     match items.len() {
         0 => Predicate::True,
-        1 => items.pop().unwrap(),
+        1 => items.swap_remove(0),
         _ => Predicate::And(items),
     }
 }
@@ -255,6 +298,14 @@ enum Stage<'a> {
     },
 }
 
+/// Runs a parsed query against `store`.
+///
+/// # Errors
+///
+/// [`ExecError::Store`] when the backend fails, [`ExecError::Cancelled`]
+/// when [`ExecOptions::cancel`] is set, and [`ExecError::TooManyEvents`]
+/// when `sort` would hold more than [`ExecOptions::max_materialized`]
+/// events.
 pub fn execute<S: EventSource + ?Sized>(
     store: &S,
     query: &Query,
@@ -426,7 +477,8 @@ fn apply<'a>(
         }
 
         (Stage::Stream(s), Command::Tail(n)) => {
-            let mut last = VecDeque::with_capacity(*n + 1);
+            // Not `with_capacity(n)`: `n` comes from the query text.
+            let mut last = VecDeque::new();
             for item in s {
                 last.push_back(item?);
                 if last.len() > *n {
@@ -504,7 +556,7 @@ fn apply<'a>(
                 .map(|row| {
                     indexes
                         .iter()
-                        .map(|i| i.and_then(|i| row[i].clone()))
+                        .map(|i| i.and_then(|i| row.get(i).cloned().flatten()))
                         .collect()
                 })
                 .collect();
@@ -570,7 +622,8 @@ fn compare_records(a: &dyn Record, b: &dyn Record, keys: &[SortKey]) -> std::cmp
     Ordering::Equal
 }
 
-/// Display form used for grouping and distinct counting.
+/// Display form used for grouping and distinct counting: arrays
+/// comma-joined, everything else as [`FieldValue`]'s `Display`.
 pub fn display_value(value: &FieldValue) -> String {
     match value {
         FieldValue::Array(items) => items
@@ -589,6 +642,10 @@ fn key_of(record: &dyn Record, fields: &[String]) -> Vec<Option<String>> {
         .collect()
 }
 
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "aggregates are floating point; large integers round"
+)]
 fn as_number(value: &FieldValue) -> Option<f64> {
     match value {
         FieldValue::Int(i) => Some(*i as f64),
@@ -629,7 +686,7 @@ impl AggState {
         match self {
             AggState::Count(n) => {
                 if !field_given || value.is_some() {
-                    *n += 1
+                    *n += 1;
                 }
             }
             AggState::Distinct(set) => {
@@ -676,6 +733,10 @@ impl AggState {
         }
     }
 
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "an average is floating point; counts past 2^53 round"
+    )]
     fn finish(self) -> Option<FieldValue> {
         match self {
             AggState::Count(n) => Some(FieldValue::Uint(n)),
@@ -694,12 +755,20 @@ impl AggState {
     }
 }
 
-/// Floors `value` to a multiple of `span`; `None` when the kinds don't fit.
+/// Floors `value` to a multiple of `span`; `None` when the kinds don't fit
+/// or the bucket start is out of range.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    reason = "the float is integral and checked to be within i64's range"
+)]
 fn bucket(value: &FieldValue, span: Span) -> Option<FieldValue> {
     match (value, span) {
-        (FieldValue::Time(t), Span::Nanos(width)) => Some(FieldValue::Time(
-            usiem::event::Timestamp::from_nanos(t.as_nanos().div_euclid(width) * width),
-        )),
+        (FieldValue::Time(t), Span::Nanos(width)) => {
+            // Flooring a time near i64::MIN can step below it.
+            let start = t.as_nanos().div_euclid(width).checked_mul(width)?;
+            Some(FieldValue::Time(usiem::event::Timestamp::from_nanos(start)))
+        }
         (v, Span::Number(width)) => {
             let floored = (as_number(v)? / width).floor() * width;
             Some(
@@ -804,7 +873,8 @@ pub fn stats_table(aggs: &[Agg], by: &[GroupKey], mut groups: Vec<StatsGroup>) -
     StatsTable { columns, rows }
 }
 
-#[cfg(all(test, feature = "jsonl"))]
+#[cfg(test)]
+#[cfg(feature = "jsonl")]
 mod tests {
     use super::*;
     use crate::query::parse;
@@ -849,7 +919,10 @@ mod tests {
             FieldValue::Ip(Ip::from_str(ip).unwrap()),
         );
         e.add_field("event.code".into(), FieldValue::Int(code));
-        e.add_field("bytes".into(), FieldValue::Uint(secs as u64 * 10));
+        e.add_field(
+            "bytes".into(),
+            FieldValue::Uint(u64::try_from(secs).unwrap() * 10),
+        );
         e
     }
 
@@ -875,7 +948,7 @@ mod tests {
             ResultRows::Events(events) => {
                 events.iter().map(|e| e.original_time().as_secs()).collect()
             }
-            other => panic!("{other:?}"),
+            other @ ResultRows::Table { .. } => panic!("{other:?}"),
         }
     }
 
@@ -891,7 +964,7 @@ mod tests {
                     })
                     .collect(),
             ),
-            other => panic!("{other:?}"),
+            other @ ResultRows::Events(_) => panic!("{other:?}"),
         }
     }
 
@@ -1040,5 +1113,61 @@ mod tests {
             execute(&s, &Query::default(), &Hosts, &options),
             Err(ExecError::Cancelled)
         ));
+    }
+
+    #[test]
+    fn huge_tail_counts_do_not_preallocate() {
+        let tmp = TempDir::new("exec-tail");
+        let s = store(&tmp);
+        // `with_capacity(n + 1)` overflowed or aborted on these.
+        assert_eq!(
+            times(&run(&s, "* | tail 18446744073709551615")),
+            [10, 20, 30, 40]
+        );
+        assert_eq!(times(&run(&s, "* | tail 1000000000000")), [10, 20, 30, 40]);
+    }
+
+    #[test]
+    fn time_buckets_near_the_minimum_do_not_overflow() {
+        let t = FieldValue::Time(Timestamp::from_nanos(i64::MIN));
+        assert_eq!(bucket(&t, Span::Nanos(3)), None);
+        assert_eq!(
+            bucket(&FieldValue::Time(Timestamp::from_nanos(-5)), Span::Nanos(3)),
+            Some(FieldValue::Time(Timestamp::from_nanos(-6)))
+        );
+        assert_eq!(bucket(&t, Span::Nanos(1)), Some(t.clone()));
+    }
+
+    #[test]
+    fn short_table_rows_read_as_missing_values() {
+        let columns = vec!["a".to_string(), "b".to_string()];
+        let values = vec![Some(FieldValue::Int(1))];
+        let row = TableRow {
+            columns: &columns,
+            values: &values,
+        };
+        assert_eq!(row.get("a").as_deref(), Some(&FieldValue::Int(1)));
+        assert_eq!(row.get("b"), None);
+    }
+
+    #[test]
+    fn sorting_mixed_kinds_is_stable_and_total() {
+        let tmp = TempDir::new("exec-mixed");
+        let mut s = JsonlStore::open(tmp.path()).unwrap();
+        let mut events = Vec::new();
+        for i in 0..500 {
+            let mut e = logon(i, "x", "10.0.0.1", 1);
+            let v = match i % 4 {
+                0 => FieldValue::Int(i),
+                1 => FieldValue::from(format!("{}", 1000 - i)),
+                2 => FieldValue::Float(2.5),
+                _ => FieldValue::Ip(Ip::from_str("10.0.0.2").unwrap()),
+            };
+            e.add_field("v".into(), v);
+            events.push(e);
+        }
+        s.append(events).unwrap();
+        let r = run(&s, "* | sort v");
+        assert_eq!(r.len(), 500);
     }
 }

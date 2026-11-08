@@ -18,6 +18,7 @@ pub struct StreamFilter {
 
 /// Why a query can't be a [`StreamFilter`].
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum StreamFilterError {
     /// The query does not parse.
     Parse(String),
@@ -39,6 +40,13 @@ impl fmt::Display for StreamFilterError {
 impl std::error::Error for StreamFilterError {}
 
 impl StreamFilter {
+    /// Parses a query that can be evaluated per event.
+    ///
+    /// # Errors
+    ///
+    /// [`StreamFilterError::Parse`] when the query does not parse, and
+    /// [`StreamFilterError::NotStreamable`] when it uses a command other
+    /// than `where`.
     pub fn parse(text: &str) -> Result<StreamFilter, StreamFilterError> {
         let query = parse(text).map_err(|e| StreamFilterError::Parse(e.to_string()))?;
         let mut wheres = Vec::new();
@@ -155,9 +163,9 @@ mod tests {
             let again = StreamFilter::parse(&text).unwrap_or_else(|e| panic!("{q} -> {text}: {e}"));
             assert_eq!(again.predicate(), parsed.predicate(), "{q} -> {text}");
             let built = StreamFilter::from_predicate(parsed.predicate().clone());
-            assert!(
-                built.matches(&event(&[("a", "1"), ("c", "3")]))
-                    == parsed.matches(&event(&[("a", "1"), ("c", "3")]))
+            assert_eq!(
+                built.matches(&event(&[("a", "1"), ("c", "3")])),
+                parsed.matches(&event(&[("a", "1"), ("c", "3")]))
             );
         }
     }

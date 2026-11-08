@@ -4,10 +4,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// A fresh directory under the system temp dir, removed on drop.
-pub struct TempDir(PathBuf);
+pub(crate) struct TempDir(PathBuf);
 
 impl TempDir {
-    pub fn new(label: &str) -> TempDir {
+    pub(crate) fn new(label: &str) -> TempDir {
         static COUNTER: AtomicUsize = AtomicUsize::new(0);
         let path = std::env::temp_dir().join(format!(
             "usiem-query-{label}-{}-{}",
@@ -19,7 +19,7 @@ impl TempDir {
         TempDir(path)
     }
 
-    pub fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         &self.0
     }
 }

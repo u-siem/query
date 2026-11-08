@@ -30,14 +30,20 @@ pub use predicate::{
     lookup,
 };
 
+/// A storage backend failure.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum StoreError {
+    /// Reading or writing failed.
     Io(std::io::Error),
-    /// A stored record could not be decoded. `location` names the segment and line.
+    /// A stored record could not be decoded.
     Corrupt {
+        /// Where: the segment and line, or the record.
         location: String,
+        /// What is wrong.
         reason: String,
     },
+    /// An event could not be encoded for storage.
     Encode(String),
 }
 
@@ -53,7 +59,14 @@ impl fmt::Display for StoreError {
     }
 }
 
-impl std::error::Error for StoreError {}
+impl std::error::Error for StoreError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            StoreError::Io(e) => Some(e),
+            StoreError::Corrupt { .. } | StoreError::Encode(_) => None,
+        }
+    }
+}
 
 impl From<std::io::Error> for StoreError {
     fn from(e: std::io::Error) -> Self {
@@ -76,11 +89,14 @@ pub struct AppendAck {
 /// Half-open interval `[start, end)` on `original_time`. `None` is unbounded.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TimeRange {
+    /// Inclusive start.
     pub start: Option<Timestamp>,
+    /// Exclusive end.
     pub end: Option<Timestamp>,
 }
 
 impl TimeRange {
+    /// Whether `t` is in the range.
     pub fn contains(&self, t: Timestamp) -> bool {
         self.start.is_none_or(|s| t >= s) && self.end.is_none_or(|e| t < e)
     }
@@ -97,31 +113,46 @@ pub enum Order {
     /// Whatever order the backend stores events in; the cheapest.
     #[default]
     Storage,
+    /// Oldest `original_time` first.
     TimeAsc,
+    /// Newest `original_time` first.
     TimeDesc,
 }
 
 /// What a backend is asked to evaluate.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct StoreQuery {
+    /// Time range on `original_time`.
     pub time: TimeRange,
+    /// Events must match this.
     pub filter: Predicate,
+    /// Result order.
     pub order: Order,
+    /// At most this many events.
     pub limit: Option<usize>,
 }
 
+/// The events a search yields, or the error that stopped it.
 pub type EventIter<'a> = Box<dyn Iterator<Item = Result<Event, StoreError>> + 'a>;
 
 /// A `stats` result: the `by` names then the aggregate names, and one row
 /// per group, built exactly as the executor's own `stats` would.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StatsTable {
+    /// Column names.
     pub columns: Vec<String>,
+    /// Rows, one value (or none) per column.
     pub rows: Vec<Vec<Option<FieldValue>>>,
 }
 
 /// Read side of an event store.
 pub trait EventSource: Send + Sync {
+    /// Events matching `query`, in its order and up to its limit.
+    ///
+    /// # Errors
+    ///
+    /// When the search cannot start; errors while reading come through the
+    /// iterator.
     fn search(&self, query: &StoreQuery) -> Result<EventIter<'_>, StoreError>;
 
     /// Fields seen so far with their value kinds, for autocomplete and
@@ -135,6 +166,10 @@ pub trait EventSource: Send + Sync {
     /// or returns `Ok(None)` to let the executor do it. An implementation
     /// must return exactly what the executor would (see
     /// [`crate::query::exec::stats_table`]).
+    ///
+    /// # Errors
+    ///
+    /// When the backend fails while aggregating.
     fn aggregate(
         &self,
         _query: &StoreQuery,
@@ -144,6 +179,7 @@ pub trait EventSource: Send + Sync {
         Ok(None)
     }
 
+    /// Whether the store holds no events.
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -151,14 +187,28 @@ pub trait EventSource: Send + Sync {
 
 /// Append-only event storage, read and written through one handle.
 pub trait EventStore: EventSource {
+    /// Appends a batch of events.
+    ///
+    /// # Errors
+    ///
+    /// When the batch cannot be encoded or written; how much of it was
+    /// written is up to the backend.
     fn append(&mut self, batch: Vec<Event>) -> Result<AppendAck, StoreError>;
 
     /// Makes every event appended so far durable: once this returns, they
     /// survive a crash or power loss. Cheap when nothing is pending.
+    ///
+    /// # Errors
+    ///
+    /// When flushing or syncing fails.
     fn sync(&mut self) -> Result<(), StoreError>;
 
     /// Ends an ingest run: flushes and persists metadata. Appending again
     /// afterwards is allowed.
+    ///
+    /// # Errors
+    ///
+    /// When flushing or writing metadata fails.
     fn seal(&mut self) -> Result<(), StoreError>;
 }
 
@@ -166,19 +216,30 @@ pub trait EventStore: EventSource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FieldKind {
+    /// [`FieldValue::Str`].
     Str,
+    /// [`FieldValue::Int`].
     Int,
+    /// [`FieldValue::Uint`].
     Uint,
+    /// [`FieldValue::Float`].
     Float,
+    /// [`FieldValue::Bool`].
     Bool,
+    /// [`FieldValue::Bytes`].
     Bytes,
+    /// [`FieldValue::Time`].
     Time,
+    /// [`FieldValue::Ip`].
     Ip,
+    /// [`FieldValue::Object`].
     Object,
+    /// [`FieldValue::Array`].
     Array,
 }
 
 impl FieldKind {
+    /// The kind of `value`.
     pub fn of(value: &FieldValue) -> FieldKind {
         match value {
             FieldValue::Str(_) => FieldKind::Str,
@@ -200,6 +261,7 @@ impl FieldKind {
 pub struct FieldStats {
     /// Events containing the field.
     pub count: u64,
+    /// Value kinds seen.
     pub kinds: BTreeSet<FieldKind>,
 }
 
@@ -211,6 +273,7 @@ pub const MAX_INVENTORY_VALUES: usize = 1_000;
 /// store holds (artifact kinds and hosts for a forensic case, say).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct FieldCatalog {
+    /// Field name → statistics.
     pub fields: BTreeMap<String, FieldStats>,
     /// Field → value → events. Empty for stores written before it existed.
     #[serde(default)]
@@ -226,11 +289,12 @@ impl FieldCatalog {
     /// A catalog counting the values of `fields`.
     pub fn with_inventory(fields: &[&str]) -> FieldCatalog {
         FieldCatalog {
-            inventory_fields: fields.iter().map(|f| f.to_string()).collect(),
+            inventory_fields: fields.iter().map(|f| (*f).to_string()).collect(),
             ..FieldCatalog::default()
         }
     }
 
+    /// Counts `event`'s fields (and inventory values).
     pub fn observe(&mut self, event: &Event) {
         for (name, value) in event.fields() {
             let stats = match self.fields.get_mut(name) {

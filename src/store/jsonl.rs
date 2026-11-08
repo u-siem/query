@@ -1,4 +1,4 @@
-//! Interim [`EventStore`](super::EventStore): JSON-lines segment files and full scans.
+//! Interim [`EventStore`]: JSON-lines segment files and full scans.
 //!
 //! ```text
 //! store/meta.json        segment list (event count + min/max original_time) and field catalog
@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use usiem::event::Timestamp;
+use usiem::event::{FieldValue, Timestamp};
 
 /// Events per segment file.
 pub const SEGMENT_EVENTS: u64 = 200_000;
@@ -39,6 +39,8 @@ struct Meta {
     catalog: FieldCatalog,
 }
 
+/// The JSON-lines store in one directory.
+#[derive(Debug)]
 pub struct JsonlStore {
     dir: PathBuf,
     meta: Meta,
@@ -47,6 +49,11 @@ pub struct JsonlStore {
 
 impl JsonlStore {
     /// Opens (or initialises) the store in `dir`.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Io`] when the directory or `meta.json` can't be read,
+    /// [`StoreError::Corrupt`] when `meta.json` doesn't decode.
     pub fn open(dir: &Path) -> Result<JsonlStore, StoreError> {
         fs::create_dir_all(dir)?;
         let meta_path = dir.join(META_FILE);
@@ -68,7 +75,7 @@ impl JsonlStore {
     /// Counts the values of `fields` in the field catalog from now on (see
     /// [`FieldCatalog::inventory`]).
     pub fn with_inventory_fields(mut self, fields: &[&str]) -> JsonlStore {
-        self.meta.catalog.inventory_fields = fields.iter().map(|f| f.to_string()).collect();
+        self.meta.catalog.inventory_fields = fields.iter().map(|f| (*f).to_string()).collect();
         self
     }
 
@@ -140,6 +147,19 @@ impl JsonlStore {
 
 impl EventStore for JsonlStore {
     fn append(&mut self, batch: Vec<Event>) -> Result<AppendAck, StoreError> {
+        // JSON has no NaN or infinity: serde_json writes them as `null`,
+        // and the line then fails to read back. Refuse the batch first.
+        for event in &batch {
+            if let Some(name) = event
+                .fields()
+                .iter()
+                .find_map(|(name, v)| has_non_finite(v).then_some(name))
+            {
+                return Err(StoreError::Encode(format!(
+                    "field {name} holds a NaN or infinite float, which JSON lines cannot store"
+                )));
+            }
+        }
         let appended = batch.len();
         let mut line = Vec::with_capacity(1024);
         for event in &batch {
@@ -148,10 +168,9 @@ impl EventStore for JsonlStore {
             serde_json::to_writer(&mut line, event)
                 .map_err(|e| StoreError::Encode(e.to_string()))?;
             line.push(b'\n');
-            let writer = self
-                .writer
-                .as_mut()
-                .expect("current_segment opens the writer");
+            let Some(writer) = self.writer.as_mut() else {
+                unreachable!("current_segment opens the writer");
+            };
             writer.write_all(&line)?;
 
             let t = event.original_time().as_nanos();
@@ -201,7 +220,7 @@ impl EventSource for JsonlStore {
         // Sorting needs every match in memory; a backend with time-sorted
         // segments (evstore) can merge instead.
         let mut events = matches.collect::<Result<Vec<_>, _>>()?;
-        events.sort_by_key(|e| e.original_time());
+        events.sort_by_key(usiem::event::CoreEvent::original_time);
         if descending {
             events.reverse();
         }
@@ -223,6 +242,15 @@ impl Drop for JsonlStore {
         if let Some(w) = self.writer.as_mut() {
             let _ = w.flush();
         }
+    }
+}
+
+fn has_non_finite(value: &FieldValue) -> bool {
+    match value {
+        FieldValue::Float(f) => !f.is_finite(),
+        FieldValue::Array(items) => items.iter().any(has_non_finite),
+        FieldValue::Object(map) => map.values().any(has_non_finite),
+        _ => false,
     }
 }
 
@@ -280,7 +308,7 @@ mod tests {
     use super::*;
     use crate::store::{Predicate, TimeRange};
     use crate::test_util::TempDir;
-    use usiem::event::{FieldValue, Origin, RawData};
+    use usiem::event::{Origin, RawData};
 
     fn event(secs: i64, user: &'static str) -> Event {
         let mut e = Event::new(
@@ -386,6 +414,27 @@ mod tests {
             ..Default::default()
         };
         assert!(collect(&store, &q).is_empty());
+    }
+
+    #[test]
+    fn refuses_floats_json_cannot_hold() {
+        let tmp = TempDir::new("jsonl-nan");
+        let mut store = JsonlStore::open(tmp.path()).unwrap();
+        for bad in [
+            FieldValue::Float(f64::NAN),
+            FieldValue::Float(f64::INFINITY),
+            FieldValue::Array(vec![FieldValue::Float(f64::NEG_INFINITY)]),
+        ] {
+            let mut e = event(10, "alice");
+            e.add_field("v".into(), bad);
+            let err = store.append(vec![event(5, "bob"), e]).unwrap_err();
+            assert!(matches!(err, StoreError::Encode(_)), "{err}");
+        }
+        // Nothing of the refused batches was written, and reads still work.
+        store.append(vec![event(20, "carol")]).unwrap();
+        let all: Vec<_> = store.search(&StoreQuery::default()).unwrap().collect();
+        assert_eq!(all.len(), 1);
+        assert!(all[0].is_ok());
     }
 
     #[test]

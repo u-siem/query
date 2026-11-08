@@ -2,9 +2,20 @@
 name = "usiem-query"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 description = "Pipe search language, predicates and query executor over uSIEM events, with pluggable storage backends."
 license = "MIT"
+repository = "https://github.com/u-siem/query"
+homepage = "https://github.com/u-siem/query"
+readme = "README.md"
+keywords = ["siem", "search", "query-language", "logging", "security"]
+categories = ["parser-implementations", "database"]
+include = [
+    "/src",
+    "/README.md",
+    "/CHANGELOG.md",
+    "/LICENSE",
+]
 
 [dependencies]
 usiem = { git = "https://github.com/u-siem/usiem", rev = "853e48b0900612e2cce0ba750adb38d9bb6c2650", features = ["serde"] }
@@ -23,6 +34,32 @@ default = ["jsonl"]
 jsonl = ["dep:serde_json", "usiem/json"]
 # `store::evstore::EvstoreSource`: the usiem-evstore backend.
 evstore = ["dep:usiem-evstore", "dep:serde_json", "usiem/json"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(docsrs)"] }
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+must_use_candidate = "allow"
+return_self_not_must_use = "allow"
+module_name_repetitions = "allow"
+similar_names = "allow"
+many_single_char_names = "allow"
+too_many_lines = "allow"
+unwrap_used = "warn"
+dbg_macro = "warn"
+todo = "warn"
+print_stdout = "warn"
 
 # Optimized dependencies keep debug test runs (serde_json, zstd) fast.
 [profile.dev.package."*"]

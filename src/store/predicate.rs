@@ -14,30 +14,47 @@ use usiem::event::{FieldValue, Ip, Timestamp};
 /// A boolean filter. `Default` is [`Predicate::True`] (match everything).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub enum Predicate {
+    /// Matches everything.
     #[default]
     True,
+    /// Every predicate matches (`True` when empty).
     And(Vec<Predicate>),
+    /// Any predicate matches (nothing when empty).
     Or(Vec<Predicate>),
+    /// The predicate does not match.
     Not(Box<Predicate>),
+    /// A test on one field; an absent field never matches.
     Field {
+        /// Field name: stored, dotted object path, `@meta` or virtual.
         field: String,
+        /// The test.
         op: Box<FieldOp>,
     },
     /// Bare search term: any string field contains it (case-insensitive).
     Text(String),
 }
 
+/// A test on one field value. On an array value, the test matches when any
+/// element matches.
 #[derive(Debug, Clone, PartialEq)]
 pub enum FieldOp {
+    /// The field is present.
     Exists,
+    /// Equals the literal: case-insensitive for text, numeric for numbers.
     Eq(Literal),
+    /// Equals any of the literals.
     In(Vec<Literal>),
     /// `*` / `?` glob, case-insensitive.
     Wildcard(Pattern),
+    /// Between bounds; each bound is `(literal, inclusive)`, `None` is
+    /// unbounded.
     Range {
+        /// Lower bound.
         lower: Option<(Literal, bool)>,
+        /// Upper bound.
         upper: Option<(Literal, bool)>,
     },
+    /// An address in the network (IP values, or text that parses as one).
     Cidr(Cidr),
     /// Contains any of several substrings, case-insensitive: what
     /// `f:*a* OR f:*b* OR ...` means, in one pass over the value. Built in
@@ -46,6 +63,7 @@ pub enum FieldOp {
 }
 
 impl Predicate {
+    /// A [`Predicate::Field`] test.
     pub fn field(field: impl Into<String>, op: FieldOp) -> Predicate {
         Predicate::Field {
             field: field.into(),
@@ -53,6 +71,7 @@ impl Predicate {
         }
     }
 
+    /// `field:value` equality ([`FieldOp::Eq`]).
     pub fn eq(field: impl Into<String>, value: &str) -> Predicate {
         Predicate::field(field, FieldOp::Eq(Literal::new(value)))
     }
@@ -148,15 +167,14 @@ impl std::fmt::Display for Predicate {
                         .collect();
                     match items.len() {
                         0 => f.write_str("NOT *"),
-                        1 => f.write_str(&items[0]),
+                        1 => f.write_str(&items.join("")),
                         _ => write!(f, "({})", items.join(" OR ")),
                     }
                 }
-                FieldOp::Range { lower, upper } => match (lower, upper) {
-                    (Some((lo, true)), Some((hi, true))) => {
+                FieldOp::Range { lower, upper } => {
+                    if let (Some((lo, true)), Some((hi, true))) = (lower, upper) {
                         write!(f, "{field}:{}..{}", quote(&lo.text), quote(&hi.text))
-                    }
-                    _ => {
+                    } else {
                         let mut parts = Vec::new();
                         if let Some((lo, inc)) = lower {
                             let op = if *inc { ">=" } else { ">" };
@@ -168,7 +186,7 @@ impl std::fmt::Display for Predicate {
                         }
                         f.write_str(&parts.join(" AND "))
                     }
-                },
+                }
             },
         }
     }
@@ -190,6 +208,7 @@ fn quote(text: &str) -> String {
 
 /// Something predicates can be evaluated against.
 pub trait Record {
+    /// The value of `field`, or `None` when the record has none.
     fn get(&self, field: &str) -> Option<Cow<'_, FieldValue>>;
     /// Visits every value, for bare-term text search.
     fn for_each_value(&self, f: &mut dyn FnMut(&FieldValue));
@@ -201,11 +220,12 @@ impl Record for Event {
     }
 
     fn for_each_value(&self, f: &mut dyn FnMut(&FieldValue)) {
-        self.fields().values().for_each(f)
+        self.fields().values().for_each(f);
     }
 }
 
 impl FieldOp {
+    /// Whether `value` passes the test.
     pub fn matches(&self, value: &FieldValue) -> bool {
         if let FieldValue::Array(items) = value {
             return items.iter().any(|item| self.matches(item));
@@ -285,12 +305,14 @@ pub fn lookup<'a>(event: &'a Event, path: &str) -> Option<Cow<'a, FieldValue>> {
 /// which costs several hash lookups per missing field. Events without any
 /// `Object` value (most parsed logs) can skip that. Whether there is one is
 /// found out on the first miss, once.
+#[derive(Debug)]
 pub struct FlatLookup<'a> {
     event: &'a Event,
     nested: std::cell::Cell<Option<bool>>,
 }
 
 impl<'a> FlatLookup<'a> {
+    /// Reads `event`.
     pub fn new(event: &'a Event) -> FlatLookup<'a> {
         FlatLookup {
             event,
@@ -298,22 +320,22 @@ impl<'a> FlatLookup<'a> {
         }
     }
 
+    /// The event read.
     pub fn event(&self) -> &'a Event {
         self.event
     }
 
     fn nested(&self) -> bool {
-        match self.nested.get() {
-            Some(nested) => nested,
-            None => {
-                let nested = self
-                    .event
-                    .fields()
-                    .values()
-                    .any(|v| matches!(v, FieldValue::Object(_)));
-                self.nested.set(Some(nested));
-                nested
-            }
+        if let Some(nested) = self.nested.get() {
+            nested
+        } else {
+            let nested = self
+                .event
+                .fields()
+                .values()
+                .any(|v| matches!(v, FieldValue::Object(_)));
+            self.nested.set(Some(nested));
+            nested
         }
     }
 }
@@ -331,31 +353,53 @@ impl Record for FlatLookup<'_> {
     }
 
     fn for_each_value(&self, f: &mut dyn FnMut(&FieldValue)) {
-        self.event.for_each_value(f)
+        self.event.for_each_value(f);
     }
 }
 
-/// Total order for sorting mixed values: numbers numerically, times
-/// chronologically, IPs by address, everything else as case-insensitive text.
+/// Total order for sorting mixed values: numbers numerically (`NaN` last),
+/// then times chronologically, then IPs by address, then everything else as
+/// case-insensitive text.
+///
+/// Values of different kinds order by kind first, so the order is total
+/// (`sort_by` requires one, and may panic without it).
 pub fn compare_values(a: &FieldValue, b: &FieldValue) -> std::cmp::Ordering {
-    use FieldValue::*;
-    use std::cmp::Ordering;
-    let number = |v: &FieldValue| match v {
-        Int(i) => Some(*i as f64),
-        Uint(u) => Some(*u as f64),
-        Float(f) => Some(*f),
-        _ => None,
-    };
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "integers past 2^53 compare as their nearest float"
+    )]
+    fn number(v: &FieldValue) -> Option<f64> {
+        match v {
+            FieldValue::Int(i) => Some(*i as f64),
+            FieldValue::Uint(u) => Some(*u as f64),
+            FieldValue::Float(f) => Some(*f),
+            _ => None,
+        }
+    }
+    fn rank(v: &FieldValue) -> u8 {
+        match v {
+            FieldValue::Int(_) | FieldValue::Uint(_) | FieldValue::Float(_) => 0,
+            FieldValue::Time(_) => 1,
+            FieldValue::Ip(_) => 2,
+            _ => 3,
+        }
+    }
     if let (Some(x), Some(y)) = (number(a), number(b)) {
-        return x.partial_cmp(&y).unwrap_or(Ordering::Equal);
+        // `total_cmp` orders a positive NaN after infinity; make every NaN
+        // sort last, and both zeros equal.
+        return match (x.is_nan(), y.is_nan()) {
+            (false, false) => x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal),
+            (nan_x, nan_y) => nan_x.cmp(&nan_y),
+        };
     }
     match (a, b) {
-        (Time(x), Time(y)) => x.cmp(y),
-        (Ip(x), Ip(y)) => ip_key(x).cmp(&ip_key(y)),
-        _ => a
-            .to_string()
-            .to_lowercase()
-            .cmp(&b.to_string().to_lowercase()),
+        (FieldValue::Time(x), FieldValue::Time(y)) => x.cmp(y),
+        (FieldValue::Ip(x), FieldValue::Ip(y)) => ip_key(x).cmp(&ip_key(y)),
+        _ => rank(a).cmp(&rank(b)).then_with(|| {
+            a.to_string()
+                .to_lowercase()
+                .cmp(&b.to_string().to_lowercase())
+        }),
     }
 }
 
@@ -372,6 +416,7 @@ fn contains_text(value: &FieldValue, lower_term: &str) -> bool {
 /// A literal from a query, pre-parsed into every type it could compare as.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Literal {
+    /// The literal as written.
     pub text: String,
     pub(crate) lower: String,
     pub(crate) int: Option<i128>,
@@ -382,6 +427,7 @@ pub struct Literal {
 }
 
 impl Literal {
+    /// Reads `text` as text, integer, float, boolean, IP and time.
     pub fn new(text: &str) -> Literal {
         let float = text.parse::<f64>().ok().filter(|f| f.is_finite());
         Literal {
@@ -399,6 +445,7 @@ impl Literal {
         }
     }
 
+    /// The time this literal reads as (see [`parse_time`]).
     pub fn as_time(&self) -> Option<Timestamp> {
         self.time
     }
@@ -424,22 +471,34 @@ impl Literal {
     /// the integer is exact as a float (|n| < 2^53). Such a literal equals a
     /// string value whose lowercase is [`Literal::lower`], or a number value
     /// equal to `n`, and nothing else.
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "n is below 2^53, so the float is exact"
+    )]
     pub fn exact_int(&self) -> Option<i64> {
-        const EXACT: i128 = 1 << 53;
+        const EXACT: u128 = 1 << 53;
         let n = self.int?;
-        let exact = n.abs() < EXACT
+        // `unsigned_abs`: `abs` overflows on `i128::MIN`, which a literal
+        // can spell.
+        let exact = n.unsigned_abs() < EXACT
             && self.float == Some(n as f64)
             && self.boolean.is_none()
             && self.ip.is_none()
             && self.time.is_none();
-        exact.then_some(n as i64)
+        if exact { i64::try_from(n).ok() } else { None }
     }
 
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "a float literal equals an integer only up to float precision"
+    )]
     fn equals(&self, value: &FieldValue) -> bool {
         match value {
             FieldValue::Str(s) => eq_ignore_case(s, &self.text, &self.lower),
-            FieldValue::Int(i) => self.int == Some(*i as i128) || self.float == Some(*i as f64),
-            FieldValue::Uint(u) => self.int == Some(*u as i128) || self.float == Some(*u as f64),
+            FieldValue::Int(i) => self.int == Some(i128::from(*i)) || self.float == Some(*i as f64),
+            FieldValue::Uint(u) => {
+                self.int == Some(i128::from(*u)) || self.float == Some(*u as f64)
+            }
             FieldValue::Float(f) => self.float == Some(*f),
             FieldValue::Bool(b) => self.boolean == Some(*b),
             FieldValue::Ip(ip) => self.ip == Some(*ip),
@@ -450,6 +509,10 @@ impl Literal {
 
     /// `self.cmp(value)`, flipped: how the literal orders against the value.
     /// `Some(Less)` means literal < value.
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "ranges over integers compare as floats"
+    )]
     fn compare(&self, value: &FieldValue) -> Option<std::cmp::Ordering> {
         match value {
             FieldValue::Int(i) => self.float?.partial_cmp(&(*i as f64)),
@@ -465,7 +528,7 @@ impl Literal {
 
 fn ip_key(ip: &Ip) -> (u8, u128) {
     match ip.as_ip_addr() {
-        IpAddr::V4(v4) => (4, u32::from(v4) as u128),
+        IpAddr::V4(v4) => (4, u128::from(u32::from(v4))),
         IpAddr::V6(v6) => (6, u128::from(v6)),
     }
 }
@@ -512,6 +575,7 @@ pub struct Pattern {
 }
 
 impl Pattern {
+    /// Compiles a glob.
     pub fn new(glob: &str) -> Pattern {
         Pattern {
             source: glob.to_string(),
@@ -522,14 +586,17 @@ impl Pattern {
         }
     }
 
+    /// The glob as given.
     pub fn as_str(&self) -> &str {
         &self.source
     }
 
+    /// Whether `text` holds `*` or `?`.
     pub fn has_wildcards(text: &str) -> bool {
         text.contains(['*', '?'])
     }
 
+    /// Whether the whole of `text` matches, ignoring case.
     pub fn matches(&self, text: &str) -> bool {
         if let Some(p) = &self.ascii
             && text.is_ascii()
@@ -572,7 +639,11 @@ pub struct Substrings {
 }
 
 impl Substrings {
-    /// `Err` only when the set is too large for the automaton.
+    /// Builds the automaton for `needles`.
+    ///
+    /// # Errors
+    ///
+    /// Only when the set is too large for the automaton.
     pub fn new<S: AsRef<str>>(needles: impl IntoIterator<Item = S>) -> Result<Substrings, String> {
         let needles: Vec<String> = needles
             .into_iter()
@@ -593,6 +664,7 @@ impl Substrings {
         })
     }
 
+    /// The needles as given.
     pub fn needles(&self) -> &[String] {
         &self.needles
     }
@@ -690,6 +762,8 @@ pub struct Cidr {
 }
 
 impl Cidr {
+    /// Parses `addr/prefix`; `None` unless the prefix fits the address
+    /// family.
     pub fn parse(text: &str) -> Option<Cidr> {
         let (addr, prefix) = text.split_once('/')?;
         let addr = IpAddr::from_str(addr).ok()?;
@@ -698,14 +772,17 @@ impl Cidr {
         (prefix <= max).then_some(Cidr { addr, prefix })
     }
 
+    /// Whether `ip` is in the network; an address of the other family
+    /// never is.
     pub fn contains(&self, ip: &Ip) -> bool {
+        let prefix = u32::from(self.prefix);
         match (self.addr, ip.as_ip_addr()) {
             (IpAddr::V4(net), IpAddr::V4(ip)) => {
-                let mask = u32::MAX.checked_shl(32 - self.prefix as u32).unwrap_or(0);
+                let mask = u32::MAX.checked_shl(32 - prefix).unwrap_or(0);
                 u32::from(net) & mask == u32::from(ip) & mask
             }
             (IpAddr::V6(net), IpAddr::V6(ip)) => {
-                let mask = u128::MAX.checked_shl(128 - self.prefix as u32).unwrap_or(0);
+                let mask = u128::MAX.checked_shl(128 - prefix).unwrap_or(0);
                 u128::from(net) & mask == u128::from(ip) & mask
             }
             _ => false,
@@ -910,5 +987,67 @@ mod tests {
             Some(Timestamp::from_secs(60))
         );
         assert_eq!(parse_time("4624"), None);
+    }
+
+    #[test]
+    fn exact_int_handles_i128_extremes() {
+        for text in [
+            "-170141183460469231731687303715884105728",
+            "170141183460469231731687303715884105727",
+        ] {
+            assert_eq!(Literal::new(text).exact_int(), None, "{text}");
+        }
+        assert_eq!(Literal::new("-42").exact_int(), Some(-42));
+        assert_eq!(Literal::new("9007199254740992").exact_int(), None);
+    }
+
+    #[test]
+    fn compare_values_is_a_total_order() {
+        use std::cmp::Ordering;
+        let values = [
+            FieldValue::Int(9),
+            FieldValue::Int(10),
+            FieldValue::Int(-3),
+            FieldValue::Uint(10),
+            FieldValue::Float(9.5),
+            FieldValue::Float(f64::NAN),
+            FieldValue::Float(-f64::NAN),
+            FieldValue::Float(f64::INFINITY),
+            FieldValue::Float(-0.0),
+            FieldValue::Int(0),
+            FieldValue::from("9"),
+            FieldValue::from("10"),
+            FieldValue::from("abc"),
+            FieldValue::from("ABC"),
+            FieldValue::Bool(true),
+            FieldValue::Time(Timestamp::from_secs(5)),
+            FieldValue::Time(Timestamp::from_secs(-5)),
+            FieldValue::Ip(Ip::from_str("10.0.0.1").unwrap()),
+            FieldValue::Ip(Ip::from_str("::1").unwrap()),
+            FieldValue::Array(vec![FieldValue::Int(1)]),
+            FieldValue::Bytes(vec![1, 2]),
+        ];
+        for a in &values {
+            assert_eq!(compare_values(a, a), Ordering::Equal, "{a:?}");
+            for b in &values {
+                let ab = compare_values(a, b);
+                assert_eq!(ab, compare_values(b, a).reverse(), "{a:?} {b:?}");
+                for c in &values {
+                    let bc = compare_values(b, c);
+                    if ab != Ordering::Greater && bc != Ordering::Greater {
+                        assert_ne!(
+                            compare_values(a, c),
+                            Ordering::Greater,
+                            "{a:?} <= {b:?} <= {c:?}"
+                        );
+                    }
+                }
+            }
+        }
+        // Sorting mixed values must not hit the "not a total order" panic.
+        let mut many: Vec<FieldValue> = (0..2_000)
+            .map(|i| values[(i * 7919) % values.len()].clone())
+            .collect();
+        many.sort_by(compare_values);
     }
 }

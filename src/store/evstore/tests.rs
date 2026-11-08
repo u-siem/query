@@ -1,6 +1,13 @@
 //! Differential tests: `EvstoreSource` must return exactly what
 //! `JsonlStore` returns, and give events back unchanged.
 
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    reason = "test data is generated from small counters"
+)]
+
 use super::*;
 use crate::store::jsonl::JsonlStore;
 use crate::store::{Pattern, Substrings, TimeRange};
@@ -298,12 +305,12 @@ fn random_predicate(rng: &mut Rng, depth: u32) -> Predicate {
     }
     match rng.below(3) {
         0 => Predicate::And(
-            (0..1 + rng.below(3))
+            (0..=rng.below(3))
                 .map(|_| random_predicate(rng, depth - 1))
                 .collect(),
         ),
         1 => Predicate::Or(
-            (0..1 + rng.below(3))
+            (0..=rng.below(3))
                 .map(|_| random_predicate(rng, depth - 1))
                 .collect(),
         ),
@@ -437,9 +444,7 @@ fn run_stats(rng: &mut Rng, jsonl: &JsonlStore, evs: &EvstoreSource, n: usize) -
     use crate::query::{ExecOptions, NoVirtualFields, ResultRows, execute, parse};
     let before = evs.pushdowns();
     for i in 0..n {
-        let aggs: Vec<&str> = (0..1 + rng.below(3))
-            .map(|_| *rng.pick(&STATS_AGGS))
-            .collect();
+        let aggs: Vec<&str> = (0..=rng.below(3)).map(|_| *rng.pick(&STATS_AGGS)).collect();
         let mut text = format!(
             "{} | stats {}{}",
             rng.pick(&STATS_FILTERS),
@@ -575,7 +580,9 @@ fn catalog_rebuilds_after_unflushed_appends() {
             .with_inventory_fields(&["host"])
             .unwrap();
         let events: Vec<Event> = (0..50).map(|i| random_event(&mut rng, i)).collect();
-        events.iter().for_each(|e| reference.observe(e));
+        for e in &events {
+            reference.observe(e);
+        }
         evs.append(events).unwrap();
         // Dropped without seal: the catalog was never saved.
     }

@@ -49,7 +49,14 @@ pub fn format_value(value: &FieldValue) -> String {
             entries.sort();
             format!("{{{}}}", entries.join(" "))
         }
-        FieldValue::Bytes(b) => b.iter().map(|byte| format!("{byte:02x}")).collect(),
+        FieldValue::Bytes(b) => {
+            use std::fmt::Write;
+            let mut hex = String::with_capacity(b.len() * 2);
+            for byte in b {
+                let _ = write!(hex, "{byte:02x}");
+            }
+            hex
+        }
         other => other.to_string(),
     }
 }

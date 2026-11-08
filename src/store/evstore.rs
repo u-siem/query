@@ -72,6 +72,16 @@ pub struct EvstoreSource {
     pushdowns: AtomicU64,
 }
 
+impl std::fmt::Debug for EvstoreSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EvstoreSource")
+            .field("events", &self.store.len())
+            .field("fields", &self.catalog.fields.len())
+            .field("pushdowns", &self.pushdowns())
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 struct CatalogMeta {
     events: u64,
@@ -98,11 +108,20 @@ fn ev_err(e: ev::StoreError) -> StoreError {
 
 impl EvstoreSource {
     /// Opens (or creates) the store in `dir` with default options.
+    ///
+    /// # Errors
+    ///
+    /// As [`EvstoreSource::open_with`].
     pub fn open(dir: &Path) -> Result<EvstoreSource, StoreError> {
         EvstoreSource::open_with(dir, Options::default())
     }
 
     /// Opens (or creates) the store in `dir`.
+    ///
+    /// # Errors
+    ///
+    /// When evstore cannot open the store, or a stored record does not
+    /// decode while the field catalog is rebuilt.
     pub fn open_with(dir: &Path, opts: Options) -> Result<EvstoreSource, StoreError> {
         let store = ev::Store::open(dir, opts).map_err(ev_err)?;
         let saved = serde_json::from_slice::<CatalogMeta>(store.app_meta()).ok();
@@ -122,8 +141,13 @@ impl EvstoreSource {
 
     /// Counts the values of `fields` in the field catalog (see
     /// [`FieldCatalog::inventory`]).
+    ///
+    /// # Errors
+    ///
+    /// When the catalog has to be rebuilt and a stored record cannot be
+    /// read.
     pub fn with_inventory_fields(mut self, fields: &[&str]) -> Result<EvstoreSource, StoreError> {
-        let wanted: Vec<String> = fields.iter().map(|f| f.to_string()).collect();
+        let wanted: Vec<String> = fields.iter().map(|f| (*f).to_string()).collect();
         let changed = wanted != self.catalog.inventory_fields;
         self.catalog.inventory_fields = wanted;
         if changed && self.catalog_rebuilt {
@@ -166,6 +190,10 @@ impl EvstoreSource {
 
     /// Periodic housekeeping: WAL sync and flush, retention, compaction (see
     /// [`ev::Store::maintain`]). Call it every second or so.
+    ///
+    /// # Errors
+    ///
+    /// When evstore fails to sync, flush, expire or compact.
     pub fn maintain(&mut self, now: Timestamp) -> Result<MaintainReport, StoreError> {
         self.save_catalog()?;
         self.store.maintain(now.0).map_err(ev_err)
@@ -476,6 +504,10 @@ fn merge_agg_rows(rows: Vec<ev::AggRow>, aggs: &[Agg], by: &[GroupKey]) -> Stats
                 .zip(aggs)
                 .map(|(state, agg)| match state {
                     MergeState::Count(n) => Some(FieldValue::Uint(n)),
+                    #[allow(
+                        clippy::cast_precision_loss,
+                        reason = "an average is floating point; counts past 2^53 round"
+                    )]
                     MergeState::Sum(sum, n) if agg.func == AggFunc::Avg => {
                         (n > 0).then(|| FieldValue::Float(sum / n as f64))
                     }
@@ -560,6 +592,10 @@ fn from_scalar(v: ev::Value) -> FieldValue {
     }
 }
 
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "used as a `map_err` callback"
+)]
 fn encode_err(e: serde_json::Error) -> StoreError {
     StoreError::Encode(e.to_string())
 }
@@ -712,11 +748,12 @@ fn decode(rec: ev::Record) -> Result<Event, StoreError> {
             (F_ARRIVAL, ev::Value::Time(t)) => arrival = Some(Timestamp(t)),
             (F_ORIGIN, ev::Value::Str(s)) => {
                 origin =
-                    Some(serde_json::from_str::<Origin>(&s).map_err(|e| corrupt(e.to_string()))?)
+                    Some(serde_json::from_str::<Origin>(&s).map_err(|e| corrupt(e.to_string()))?);
             }
             (F_RAW, ev::Value::Str(s)) => raw = Some(RawData::Text(s)),
             (F_RAW_JSON, ev::Value::Str(s)) => {
-                raw = Some(serde_json::from_str::<RawData>(&s).map_err(|e| corrupt(e.to_string()))?)
+                raw =
+                    Some(serde_json::from_str::<RawData>(&s).map_err(|e| corrupt(e.to_string()))?);
             }
             (F_COMPLEX, _) => {}
             (n, value) if n.starts_with('@') && !n.starts_with("@@") => {
@@ -812,7 +849,7 @@ fn cidr_range(c: &Cidr) -> (u128, u128) {
 }
 
 fn non_str_types() -> impl Iterator<Item = ev::ValueType> {
-    use ev::ValueType::*;
+    use ev::ValueType::{Bool, F64, I64, Ip, Time, U64};
     [I64, U64, F64, Bool, Time, Ip].into_iter()
 }
 
@@ -959,5 +996,6 @@ fn narrow_time(p: &Predicate, time: &mut ev::TimeRange) {
     }
 }
 
-#[cfg(all(test, feature = "jsonl"))]
+#[cfg(test)]
+#[cfg(feature = "jsonl")]
 mod tests;
