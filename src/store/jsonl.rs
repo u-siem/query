@@ -413,7 +413,7 @@ mod tests {
             },
             ..Default::default()
         };
-        assert!(collect(&store, &q).is_empty());
+        assert_eq!(collect(&store, &q), [] as [(i64, String); 0]);
     }
 
     #[test]
