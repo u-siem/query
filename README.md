@@ -64,13 +64,15 @@ carry a byte position, nesting of `(` and `NOT` is capped
 overflowing. The parser and the value parsers are fuzzed (see
 [CONTRIBUTING.md](CONTRIBUTING.md)).
 
-## Developing against a local uSIEM
+## Developing against local checkouts
 
-`Cargo.toml` pins `usiem` to a commit on GitHub. To build against a sibling
-checkout instead, override the source on the command line:
+`Cargo.toml` pins `usiem` and `usiem-evstore` to commits on GitHub. To build
+against sibling checkouts instead, override the sources on the command line:
 
 ```sh
 cargo test --config "patch.'https://github.com/u-siem/usiem'.usiem.path='../usiem'"
+cargo test --all-features \
+  --config "patch.'https://github.com/u-siem/evstore'.usiem-evstore.path='../usiem-evstore'"
 ```
 
 That rewrites `Cargo.lock`; do not commit the result.

@@ -65,7 +65,7 @@ fn ip_value(rng: &mut Rng) -> FieldValue {
 
 fn scalar_value(rng: &mut Rng) -> FieldValue {
     match rng.below(7) {
-        0 => str_value(rng.pick(&HOSTS)),
+        0 => str_value(rng.pick::<&str>(&HOSTS)),
         1 => FieldValue::Int(rng.below(600) as i64 - 100),
         2 => FieldValue::Uint(rng.below(600)),
         3 => FieldValue::Float(*rng.pick(&[0.0, -0.0, 1.5, 443.0, -2.25])),
@@ -80,7 +80,7 @@ fn object(rng: &mut Rng, depth: u32) -> FieldValue {
     if rng.chance(80) {
         map.insert(
             Text::from("name"),
-            str_value(rng.pick(&["root", "Alice", "bob", "svc"])),
+            str_value(rng.pick::<&str>(&["root", "Alice", "bob", "svc"])),
         );
     }
     if rng.chance(50) {
@@ -101,7 +101,9 @@ fn object(rng: &mut Rng, depth: u32) -> FieldValue {
 fn array(rng: &mut Rng, depth: u32) -> FieldValue {
     let n = rng.below(4) as usize;
     FieldValue::Array(match rng.below(4) {
-        0 => (0..n).map(|_| str_value(rng.pick(&WORDS))).collect(),
+        0 => (0..n)
+            .map(|_| str_value(rng.pick::<&str>(&WORDS)))
+            .collect(),
         1 => (0..n)
             .map(|_| FieldValue::Int(rng.below(10) as i64))
             .collect(),
@@ -135,7 +137,7 @@ fn random_event(rng: &mut Rng, n: u64) -> Event {
     let mut e = Event::new(Timestamp(arrival), Timestamp(original), origin, raw);
     let mut add = |name: &str, v: FieldValue| e.add_field(name.to_string(), v);
     if rng.chance(90) {
-        add("host", str_value(rng.pick(&HOSTS)));
+        add("host", str_value(rng.pick::<&str>(&HOSTS)));
     }
     if rng.chance(70) {
         let ip = if rng.chance(15) {
@@ -178,7 +180,7 @@ fn random_event(rng: &mut Rng, n: u64) -> Event {
     }
     match rng.below(4) {
         0 => add("user", object(rng, 2)),
-        1 => add("user.name", str_value(rng.pick(&["root", "Alice"]))),
+        1 => add("user.name", str_value(rng.pick::<&str>(&["root", "Alice"]))),
         2 => {
             add("user", object(rng, 1));
             add("user.name", str_value("flat-wins"));
@@ -264,7 +266,7 @@ const CIDRS: [&str; 5] = [
 const TERMS: [&str; 6] = ["web", "10.0", "LOGIN", "root", "a", "db8"];
 
 fn literal(rng: &mut Rng) -> Literal {
-    Literal::new(rng.pick(&TOKENS))
+    Literal::new(rng.pick::<&str>(&TOKENS))
 }
 
 fn random_op(rng: &mut Rng) -> FieldOp {
@@ -272,12 +274,12 @@ fn random_op(rng: &mut Rng) -> FieldOp {
         0 => FieldOp::Exists,
         1 => FieldOp::Eq(literal(rng)),
         2 => FieldOp::In(vec![literal(rng), literal(rng)]),
-        3 => FieldOp::Wildcard(Pattern::new(rng.pick(&GLOBS))),
+        3 => FieldOp::Wildcard(Pattern::new(rng.pick::<&str>(&GLOBS))),
         4 => FieldOp::Range {
             lower: rng.chance(70).then(|| (literal(rng), rng.chance(50))),
             upper: rng.chance(70).then(|| (literal(rng), rng.chance(50))),
         },
-        5 => FieldOp::Cidr(Cidr::parse(rng.pick(&CIDRS)).unwrap()),
+        5 => FieldOp::Cidr(Cidr::parse(rng.pick::<&str>(&CIDRS)).unwrap()),
         _ => FieldOp::ContainsAny(Substrings::new([*rng.pick(&TERMS), *rng.pick(&TERMS)]).unwrap()),
     }
 }

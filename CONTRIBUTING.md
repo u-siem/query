@@ -18,18 +18,21 @@ cargo deny check                         # https://github.com/EmbarkStudios/carg
 The minimum supported Rust version is 1.89. CI tests it, along with Linux,
 Windows and macOS.
 
-## Local uSIEM checkouts
+## Local uSIEM and evstore checkouts
 
-`usiem` is a git dependency pinned to a commit. To try a change in a sibling
-`../usiem` checkout, override it for one command:
+`usiem` and `usiem-evstore` are git dependencies pinned to commits. To try a
+change in a sibling `../usiem` or `../usiem-evstore` checkout, override it for
+one command:
 
 ```sh
 cargo test --config "patch.'https://github.com/u-siem/usiem'.usiem.path='../usiem'"
+cargo test --all-features \
+  --config "patch.'https://github.com/u-siem/evstore'.usiem-evstore.path='../usiem-evstore'"
 ```
 
 The override rewrites `Cargo.lock`. Never commit that lockfile: restore it
 with `git checkout Cargo.lock`, and bump the pinned `rev` in `Cargo.toml` in
-its own commit once the uSIEM change is on GitHub.
+its own commit once the upstream change is on GitHub.
 
 ## Behaviour changes
 
