@@ -7,7 +7,7 @@ description = "Pipe search language, predicates and query executor over uSIEM ev
 license = "MIT"
 
 [dependencies]
-usiem = { path = "../usiem", features = ["serde"] }
+usiem = { git = "https://github.com/u-siem/usiem", rev = "853e48b0900612e2cce0ba750adb38d9bb6c2650", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 aho-corasick = "1"
 serde_json = { version = "1", optional = true }
