@@ -7,6 +7,19 @@ with no prefix (`0.1.0`).
 
 ## [Unreleased]
 
+### Changed
+
+- `EvstoreSource::search`:
+  - pushes `NOT` down when its operand translates exactly;
+  - pushes bare terms that could be IP text (`443`, `10.0`, `db8`) as
+    "contains in a string field, or has an IP field" instead of scanning
+    every event;
+  - skips the per-event re-check when the whole filter translates exactly;
+  - parses each distinct `@origin` once per search.
+- `benches/evstore.rs`: end-to-end benchmarks over the evstore backend
+  (`cargo bench --features evstore`).
+
+
 ## [0.1.0]
 
 First public release.

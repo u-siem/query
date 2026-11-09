@@ -553,6 +553,34 @@ fn differential_against_jsonl() {
 }
 
 #[test]
+fn differential_with_full_field_registry() {
+    // Past the field cap, names land in the overflow field and the adapter
+    // can no longer prove translations exact or rule out IP fields.
+    let jdir = TempDir::new("diff-full-jsonl");
+    let edir = TempDir::new("diff-full-evstore");
+    let mut jsonl = JsonlStore::open(jdir.path()).unwrap();
+    let opts = Options {
+        max_fields: 8,
+        ..small_opts()
+    };
+    let mut evs = EvstoreSource::open_with(edir.path(), opts).unwrap();
+    let mut rng = Rng(0xf011);
+    let mut originals = HashMap::new();
+    for batch in 0..4u64 {
+        let events: Vec<Event> = (0..200)
+            .map(|i| random_event(&mut rng, batch * 1000 + i))
+            .collect();
+        for e in &events {
+            originals.insert(e.id().as_u64(), e.clone());
+        }
+        jsonl.append(events.clone()).unwrap();
+        evs.append(events).unwrap();
+    }
+    assert!(evs.store().fields().is_full());
+    run_queries(&mut rng, &jsonl, &evs, &originals, 150);
+}
+
+#[test]
 fn sync_makes_appends_durable() {
     let dir = TempDir::new("sync");
     let mut rng = Rng(11);

@@ -165,8 +165,9 @@ impl EvstoreSource {
             order: ev::Order::Storage,
             ..ev::Query::default()
         };
+        let mut origins = OriginCache::default();
         for rec in self.store.search(&query).map_err(ev_err)? {
-            catalog.observe(&decode(rec.map_err(ev_err)?)?);
+            catalog.observe(&decode_with(rec.map_err(ev_err)?, &mut origins)?);
         }
         self.catalog = catalog;
         self.catalog_dirty = true;
@@ -217,18 +218,31 @@ impl EventSource for EvstoreSource {
             Order::TimeAsc => ev::Order::Asc,
             Order::TimeDesc => ev::Order::Desc,
         };
+        let registry = self.store.fields();
+        // An exact translation needs no re-check; otherwise evstore returns a
+        // superset and every candidate is checked here.
+        let exact = if registry.is_full() {
+            None
+        } else {
+            translate_exact(registry, &query.filter)
+        };
+        let recheck = exact.is_none().then(|| query.filter.clone());
         let pushed = ev::Query {
             time,
-            filter: translate(&query.filter),
+            filter: exact.unwrap_or_else(|| translate(registry, &query.filter)),
             order,
             limit: None,
         };
         let records = self.store.search(&pushed).map_err(ev_err)?;
-        let filter = query.filter.clone();
         let range = query.time;
-        let events = records.filter_map(move |r| match r.map_err(ev_err).and_then(decode) {
-            Ok(e) => (range.contains(e.original_time()) && filter.matches(&e)).then_some(Ok(e)),
-            Err(e) => Some(Err(e)),
+        let mut origins = OriginCache::default();
+        let events = records.filter_map(move |r| {
+            match r.map_err(ev_err).and_then(|r| decode_with(r, &mut origins)) {
+                Ok(e) => (range.contains(e.original_time())
+                    && recheck.as_ref().is_none_or(|f| f.matches(&e)))
+                .then_some(Ok(e)),
+                Err(e) => Some(Err(e)),
+            }
         });
         Ok(match query.limit {
             Some(n) => Box::new(events.take(n)),
@@ -738,7 +752,34 @@ fn insert(
     Ok(())
 }
 
+/// Parsed `@origin` values by their stored JSON: a store holds few distinct
+/// origins, so most events skip the JSON parse.
+#[derive(Default)]
+struct OriginCache(HashMap<String, Origin>);
+
+impl OriginCache {
+    /// Distinct origins kept; past this the cache starts over.
+    const MAX: usize = 1024;
+
+    fn get(&mut self, json: String) -> Result<Origin, StoreError> {
+        if let Some(origin) = self.0.get(&json) {
+            return Ok(origin.clone());
+        }
+        let origin = serde_json::from_str::<Origin>(&json).map_err(|e| corrupt(e.to_string()))?;
+        if self.0.len() >= Self::MAX {
+            self.0.clear();
+        }
+        self.0.insert(json, origin.clone());
+        Ok(origin)
+    }
+}
+
+#[cfg(test)]
 fn decode(rec: ev::Record) -> Result<Event, StoreError> {
+    decode_with(rec, &mut OriginCache::default())
+}
+
+fn decode_with(rec: ev::Record, origins: &mut OriginCache) -> Result<Event, StoreError> {
     let mut arrival = None;
     let mut origin = None;
     let mut raw = None;
@@ -746,10 +787,7 @@ fn decode(rec: ev::Record) -> Result<Event, StoreError> {
     for (name, value) in rec.fields {
         match (name.as_str(), value) {
             (F_ARRIVAL, ev::Value::Time(t)) => arrival = Some(Timestamp(t)),
-            (F_ORIGIN, ev::Value::Str(s)) => {
-                origin =
-                    Some(serde_json::from_str::<Origin>(&s).map_err(|e| corrupt(e.to_string()))?);
-            }
+            (F_ORIGIN, ev::Value::Str(s)) => origin = Some(origins.get(s)?),
             (F_RAW, ev::Value::Str(s)) => raw = Some(RawData::Text(s)),
             (F_RAW_JSON, ev::Value::Str(s)) => {
                 raw =
@@ -913,20 +951,38 @@ fn value_filters(name: &str, op: &FieldOp, out: &mut Vec<ev::Filter>) {
     }
 }
 
-fn translate(p: &Predicate) -> ev::Filter {
+/// An evstore filter matching a superset of what `p` matches.
+fn translate(registry: &ev::FieldRegistry, p: &Predicate) -> ev::Filter {
     match p {
-        Predicate::True | Predicate::Not(_) => ev::Filter::True,
-        Predicate::And(ps) => ev::Filter::And(ps.iter().map(translate).collect()),
-        Predicate::Or(ps) => ev::Filter::Or(ps.iter().map(translate).collect()),
+        Predicate::True => ev::Filter::True,
+        // A negation is pushed only when its operand translates exactly
+        // (the complement of a superset is not a superset).
+        Predicate::Not(inner) => match translate_exact(registry, inner) {
+            Some(f) if !registry.is_full() => ev::Filter::Not(Box::new(f)),
+            _ => ev::Filter::True,
+        },
+        Predicate::And(ps) => ev::Filter::And(ps.iter().map(|p| translate(registry, p)).collect()),
+        Predicate::Or(ps) => ev::Filter::Or(ps.iter().map(|p| translate(registry, p)).collect()),
         Predicate::Text(term) => {
+            let mut any = vec![
+                ev::Filter::field(ev::ANY_FIELD, ev::FieldOp::Contains(term.clone())),
+                ev::Filter::field(F_COMPLEX, ev::FieldOp::Exists),
+            ];
+            // Text search also matches the text form of IPs: keep every
+            // event with an IP field. Past the field cap, IPs may hide in
+            // the overflow field, so nothing can be ruled out.
             if only_chars(term, IP_CHARS) {
-                ev::Filter::True
-            } else {
-                ev::Filter::Or(vec![
-                    ev::Filter::field(ev::ANY_FIELD, ev::FieldOp::Contains(term.clone())),
-                    ev::Filter::field(F_COMPLEX, ev::FieldOp::Exists),
-                ])
+                if registry.is_full() {
+                    return ev::Filter::True;
+                }
+                any.extend(
+                    registry
+                        .iter()
+                        .filter(|(_, info)| info.ty == ev::ValueType::Ip)
+                        .map(|(_, info)| ev::Filter::field(info.name.clone(), ev::FieldOp::Exists)),
+                );
             }
+            ev::Filter::Or(any)
         }
         Predicate::Field { field, op } => {
             if field == F_ARRIVAL {

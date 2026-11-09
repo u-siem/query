@@ -344,7 +344,7 @@ dependencies = [
 [[package]]
 name = "usiem-evstore"
 version = "0.1.0"
-source = "git+https://github.com/u-siem/evstore?rev=38b2411799a44718d3419c441b31626ad2e4dfa3#38b2411799a44718d3419c441b31626ad2e4dfa3"
+source = "git+https://github.com/u-siem/evstore?rev=4021942634035228517225f9cf5646ca1fd5e04f#4021942634035228517225f9cf5646ca1fd5e04f"
 dependencies = [
  "crc32fast",
  "memmap2",
