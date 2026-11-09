@@ -783,8 +783,11 @@ fn decode_with(rec: ev::Record, origins: &mut OriginCache) -> Result<Event, Stor
     let mut arrival = None;
     let mut origin = None;
     let mut raw = None;
+    // Plain top-level fields (the common case) keep their stored name and
+    // skip the object tree; only object and array parts go through `root`.
+    let mut flat: Vec<(String, FieldValue)> = Vec::with_capacity(rec.fields.len());
     let mut root: HashMap<String, Node> = HashMap::new();
-    for (name, value) in rec.fields {
+    for (mut name, value) in rec.fields {
         match (name.as_str(), value) {
             (F_ARRIVAL, ev::Value::Time(t)) => arrival = Some(Timestamp(t)),
             (F_ORIGIN, ev::Value::Str(s)) => origin = Some(origins.get(s)?),
@@ -796,6 +799,12 @@ fn decode_with(rec: ev::Record, origins: &mut OriginCache) -> Result<Event, Stor
             (F_COMPLEX, _) => {}
             (n, value) if n.starts_with('@') && !n.starts_with("@@") => {
                 return Err(corrupt(format!("unexpected meta field {n} = {value:?}")));
+            }
+            (n, value) if !n.contains([OBJ_SEP, ARRAY, COMPLEX, OBJECT]) => {
+                if n.starts_with("@@") {
+                    name.remove(0);
+                }
+                flat.push((name, from_scalar(value)));
             }
             (n, value) => {
                 let n = n
@@ -817,6 +826,14 @@ fn decode_with(rec: ev::Record, origins: &mut OriginCache) -> Result<Event, Stor
         origin.ok_or_else(|| corrupt("missing @origin"))?,
         raw.ok_or_else(|| corrupt("missing raw data"))?,
     );
+    for (k, value) in flat {
+        if root.contains_key(&k) {
+            return Err(corrupt(format!(
+                "{k} is both a value and an object or array"
+            )));
+        }
+        event.add_field(k, value);
+    }
     for (k, node) in root {
         event.add_field(k, node.into_value());
     }

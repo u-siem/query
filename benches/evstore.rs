@@ -23,8 +23,8 @@ use usiem::event::{FieldValue, Ip, Origin, RawData, Timestamp};
 use usiem_query::Event;
 use usiem_query::query::exec::{ExecOptions, NoVirtualFields, ResultRows, execute};
 use usiem_query::query::parser::parse;
-use usiem_query::store::EventStore;
 use usiem_query::store::evstore::{EvstoreSource, Options, SyncPolicy};
+use usiem_query::store::{EventSource, EventStore, StoreQuery};
 
 struct Rng(u64);
 
@@ -135,6 +135,30 @@ fn main() {
         "event.code:* | stats count by event.code",
         "admin | stats count by host",
     ];
+    // Adapter only: evstore materialization plus event decode, no executor.
+    {
+        let all = StoreQuery::default();
+        let count = || {
+            let mut n = 0usize;
+            for e in store.search(&all).expect("search") {
+                black_box(e.expect("event"));
+                n += 1;
+            }
+            n
+        };
+        let mut n = count();
+        let mut samples = Vec::with_capacity(runs);
+        for _ in 0..runs {
+            let t = Instant::now();
+            n = black_box(count());
+            samples.push(t.elapsed());
+        }
+        let d = median(samples);
+        #[allow(clippy::cast_precision_loss, reason = "a rate for display")]
+        let per = d.as_nanos() as f64 / n.max(1) as f64;
+        eprintln!("raw adapter search, all events: {d:.2?} for {n} ({per:.0} ns/event)");
+    }
+
     let options = ExecOptions {
         max_rows: 1_000_000,
         ..ExecOptions::default()

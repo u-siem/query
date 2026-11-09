@@ -337,23 +337,85 @@ pub fn execute<S: EventSource + ?Sized>(
         commands = &plan.commands[1..];
     }
 
+    // A leading `tail n` over a time-ordered stream reads the stream
+    // backwards and stops after `n` events. Both orders are exact mirrors
+    // (ties included), so this equals keeping the last `n`.
+    let mut tail = None;
+    if pushed.is_none()
+        && let Some(Command::Tail(n)) = commands.first()
+        && plan.store.order != Order::Storage
+    {
+        plan.store.order = match plan.store.order {
+            Order::TimeAsc => Order::TimeDesc,
+            _ => Order::TimeAsc,
+        };
+        if plan.residual == Predicate::True {
+            plan.store.limit = Some(*n);
+        }
+        tail = Some(*n);
+        commands = &commands[1..];
+    }
+
     let cancel = options.cancel.clone();
     let residual = plan.residual.clone();
-    let mut stage = match pushed {
-        Some(table) => table,
-        None => Stage::Stream(event_stream(
-            store,
-            &plan.store,
-            cancel,
-            residual,
-            virtual_fields,
-        )?),
+    let mut stage = if let Some(table) = pushed {
+        table
+    } else {
+        let stream = event_stream(store, &plan.store, cancel, residual, virtual_fields)?;
+        if let Some(n) = tail {
+            let mut events = stream.take(n).collect::<Result<Vec<_>, _>>()?;
+            events.reverse();
+            Stage::Events(events)
+        } else {
+            Stage::Stream(stream)
+        }
     };
     let mut projection: Option<Vec<String>> = None;
-    for command in commands {
+    for (i, command) in commands.iter().enumerate() {
+        // `sort | head n` keeps only the best `n` instead of sorting all.
+        if let (Command::Sort(keys), Some(Command::Head(n)), Stage::Stream(_)) =
+            (command, commands.get(i + 1), &stage)
+            && *n <= TOP_K_MAX
+        {
+            let Stage::Stream(stream) = stage else {
+                unreachable!("matched above")
+            };
+            stage = Stage::Events(top_k(stream, keys, *n, virtual_fields)?);
+            continue;
+        }
         stage = apply(stage, command, virtual_fields, options, &mut projection)?;
     }
     finish_result(stage, options, started, projection)
+}
+
+/// Largest `head` that `sort | head` serves with a bounded buffer.
+const TOP_K_MAX: usize = 10_000;
+
+/// The first `n` events of `stream` sorted by `keys` (a stable sort, then
+/// `head n`), keeping at most `n` events in memory.
+fn top_k(
+    stream: EventStream<'_>,
+    keys: &[SortKey],
+    n: usize,
+    vf: &dyn VirtualFields,
+) -> Result<Vec<Event>, ExecError> {
+    let cmp = |a: &Event, b: &Event| compare_records(&enriched(a, vf), &enriched(b, vf), keys);
+    let mut best: Vec<Event> = Vec::new();
+    for item in stream {
+        let event = item?;
+        if best.len() == n {
+            // Ties go to the earlier event, as in a stable sort.
+            match best.last() {
+                Some(last) if cmp(&event, last).is_lt() => {
+                    best.pop();
+                }
+                _ => continue,
+            }
+        }
+        let at = best.partition_point(|x| !cmp(x, &event).is_gt());
+        best.insert(at, event);
+    }
+    Ok(best)
 }
 
 fn event_stream<'a, S: EventSource + ?Sized>(

@@ -646,3 +646,111 @@ fn ip_mapping() {
     assert!(lo <= ip_to_u128(&Ip::from_str("1.2.3.4").unwrap()));
     assert!(hi >= ip_to_u128(&Ip::from_str("255.0.0.1").unwrap()));
 }
+
+/// `code@parity`: a virtual field, so filters on it stay in the executor.
+struct Parity;
+
+impl crate::query::exec::VirtualFields for Parity {
+    fn resolve(&self, event: &Event, field: &str) -> Option<FieldValue> {
+        let Some(FieldValue::Int(code)) = event.get_field(field.strip_suffix("@parity")?) else {
+            return None;
+        };
+        Some(str_value(if code % 2 == 0 { "even" } else { "odd" }))
+    }
+}
+
+#[test]
+fn tail_and_top_k_match_full_pipelines() {
+    use crate::query::exec::{ExecError, ExecOptions, ResultRows, execute};
+    use crate::query::parser::parse;
+
+    // Few distinct times and sort keys: lots of ties in both.
+    let events: Vec<Event> = (0..400i64)
+        .map(|i| {
+            let mut e = Event::new(
+                Timestamp(T0 + 100 + i % 9),
+                Timestamp(T0 + i % 9),
+                Origin::Hostname("h".into()),
+                RawData::from_text(format!("line {i}")),
+            );
+            e.add_field("code".into(), FieldValue::Int(i % 5));
+            e.add_field("n".into(), FieldValue::Int(i));
+            e
+        })
+        .collect();
+    let jdir = TempDir::new("topk-jsonl");
+    let edir = TempDir::new("topk-evstore");
+    let mut jsonl = JsonlStore::open(jdir.path()).unwrap();
+    let mut evs = EvstoreSource::open_with(edir.path(), small_opts()).unwrap();
+    for batch in events.chunks(150) {
+        jsonl.append(batch.to_vec()).unwrap();
+        evs.append(batch.to_vec()).unwrap();
+        evs.seal().unwrap();
+    }
+
+    let ids = |source: &dyn EventSource, text: &str, options: &ExecOptions| -> Vec<u64> {
+        let query = parse(text).unwrap();
+        let result = execute(source, &query, &Parity, options).unwrap();
+        let ResultRows::Events(events) = result.rows else {
+            panic!("{text}: not events");
+        };
+        events.iter().map(|e| e.id().as_u64()).collect()
+    };
+    let all = ExecOptions {
+        max_rows: 100_000,
+        ..ExecOptions::default()
+    };
+    let sources: [(&str, &dyn EventSource); 2] = [("jsonl", &jsonl), ("evstore", &evs)];
+    for (backend, source) in sources {
+        for (filter, n) in [
+            ("code:*", 7),
+            ("code:(1 OR 3)", 50),
+            ("code@parity:odd", 13),
+            ("code:*", 0),
+            ("code:*", 1000),
+        ] {
+            // `tail n` is the last n of the whole result.
+            let full = ids(source, filter, &all);
+            let tail = ids(source, &format!("{filter} | tail {n}"), &all);
+            assert_eq!(
+                tail,
+                full[full.len().saturating_sub(n)..],
+                "{backend}: {filter} | tail {n}"
+            );
+            let full = ids(source, &format!("{filter} | sort -@timestamp"), &all);
+            let tail = ids(
+                source,
+                &format!("{filter} | sort -@timestamp | tail {n}"),
+                &all,
+            );
+            assert_eq!(
+                tail,
+                full[full.len().saturating_sub(n)..],
+                "{backend}: desc tail {n}"
+            );
+
+            // `sort | head n` is the first n of the stable full sort.
+            for keys in ["-code", "+code -n", "code@parity"] {
+                let full = ids(source, &format!("{filter} | sort {keys}"), &all);
+                let head = ids(source, &format!("{filter} | sort {keys} | head {n}"), &all);
+                assert_eq!(
+                    head,
+                    full[..n.min(full.len())],
+                    "{backend}: {filter} | sort {keys} | head {n}"
+                );
+            }
+        }
+
+        // The bounded buffer no longer needs every event in memory.
+        let tight = ExecOptions {
+            max_materialized: 10,
+            ..all.clone()
+        };
+        assert_eq!(ids(source, "code:* | sort -n | head 3", &tight).len(), 3);
+        let query = parse("code:* | sort -n").unwrap();
+        assert!(matches!(
+            execute(source, &query, &Parity, &tight),
+            Err(ExecError::TooManyEvents(10))
+        ));
+    }
+}

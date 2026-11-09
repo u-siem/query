@@ -18,6 +18,14 @@ with no prefix (`0.1.0`).
   - parses each distinct `@origin` once per search.
 - `benches/evstore.rs`: end-to-end benchmarks over the evstore backend
   (`cargo bench --features evstore`).
+- `tail n` over a time-ordered result reads it newest-first and stops after
+  `n` events (the store gets the limit when no virtual-field filter
+  remains), instead of streaming everything.
+- `sort … | head n` (n ≤ 10,000) keeps only the best `n` events in a
+  bounded buffer, with the same result as a stable sort. It no longer
+  fails with `TooManyEvents` when the stream exceeds `max_materialized`.
+- `EvstoreSource` decodes plain top-level fields without building an
+  object tree (about 20% less time per event in a raw search).
 
 
 ## [0.1.0]
