@@ -134,6 +134,10 @@ fn main() {
         "host:web07 | stats count by user.name",
         "event.code:* | stats count by event.code",
         "admin | stats count by host",
+        "host:web07 | stats dc(user.name)",
+        "443 | stats count by event.code",
+        "event.code:* | where source.port>1024 | stats dc(user.name) by host",
+        "* | sort @timestamp | head 50000 | stats values(event.code)",
     ];
     // Adapter only: evstore materialization plus event decode, no executor.
     {

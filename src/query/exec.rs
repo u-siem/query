@@ -11,8 +11,8 @@
 use super::{Agg, AggFunc, Command, GroupKey, Query, SortKey, Span, is_virtual_field};
 use crate::Event;
 use crate::store::{
-    EventSource, Order, Predicate, Record, StatsTable, StoreError, StoreQuery, compare_values,
-    lookup,
+    EventSource, Order, Predicate, Projection, Record, StatsTable, StoreError, StoreQuery,
+    compare_values, lookup,
 };
 use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
@@ -256,6 +256,7 @@ pub fn plan_with_order(query: &Query, default_order: Order) -> Plan {
             filter: pushed,
             order,
             limit,
+            projection: None,
         },
         residual,
         commands,
@@ -356,6 +357,10 @@ pub fn execute<S: EventSource + ?Sized>(
         commands = &commands[1..];
     }
 
+    if pushed.is_none() {
+        plan.store.projection = stream_projection(&plan.residual, commands);
+    }
+
     let cancel = options.cancel.clone();
     let residual = plan.residual.clone();
     let mut stage = if let Some(table) = pushed {
@@ -386,6 +391,37 @@ pub fn execute<S: EventSource + ?Sized>(
         stage = apply(stage, command, virtual_fields, options, &mut projection)?;
     }
     finish_result(stage, options, started, projection)
+}
+
+/// What the event stream must carry when its events end up in a `stats`
+/// and never reach the result: the residual's fields, then those read by
+/// each command up to that `stats`. `None` (whole events) when the events
+/// are the result, or when a virtual field is read.
+fn stream_projection(residual: &Predicate, commands: &[Command]) -> Option<Projection> {
+    let mut p = Projection::default();
+    if !p.read(residual) {
+        return None;
+    }
+    for command in commands {
+        let ok = match command {
+            Command::Where(pred) => p.read(pred),
+            Command::Sort(keys) => keys.iter().all(|k| p.read_field(&k.field)),
+            Command::Dedup(fields) => fields.iter().all(|f| p.read_field(f)),
+            Command::Head(_) | Command::Tail(_) | Command::Fields(_) => true,
+            Command::Stats { aggs, by } => {
+                let ok = by.iter().all(|g| p.read_field(g.field()))
+                    && aggs
+                        .iter()
+                        .filter_map(|a| a.field.as_deref())
+                        .all(|f| p.read_field(f));
+                return ok.then_some(p);
+            }
+        };
+        if !ok {
+            return None;
+        }
+    }
+    None
 }
 
 /// Largest `head` that `sort | head` serves with a bounded buffer.
@@ -1050,6 +1086,51 @@ mod tests {
         let p = plan(&parse("* | stats count").unwrap());
         assert_eq!(p.store.order, Order::Storage);
         assert_eq!(p.store.time, TimeRange::default());
+    }
+
+    #[test]
+    fn stream_projection_reads_only_up_to_stats() {
+        let proj = |text: &str| {
+            let plan = plan(&parse(text).unwrap());
+            stream_projection(&plan.residual, &plan.commands)
+        };
+        let fields = |names: &[&str], raw, origin| {
+            Some(Projection {
+                fields: Some(names.iter().map(|n| (*n).to_string()).collect()),
+                raw,
+                origin,
+            })
+        };
+        // Events reach the result: whole events.
+        assert_eq!(proj("host:a"), None);
+        assert_eq!(proj("* | fields host | sort -bytes"), None);
+        assert_eq!(proj("* | where code>5 | head 3"), None);
+        // Up to the first `stats`, in reading order; meta fields are free.
+        assert_eq!(proj("* | stats count"), fields(&[], false, false));
+        assert_eq!(
+            proj(
+                "* | where code>5 | sort -bytes, @timestamp | head 10 | dedup user.name | stats dc(src) by host, bucket(@arrival,1m) | sort -host"
+            ),
+            fields(&["code", "bytes", "user.name", "host", "src"], false, false)
+        );
+        assert_eq!(
+            proj("* | where @id:x | stats count"),
+            fields(&[], true, true)
+        );
+        assert_eq!(proj("* | stats count by @origin"), fields(&[], false, true));
+        // A bare text term reads every field (but not the raw data).
+        assert_eq!(
+            proj("* | where admin | stats count by host"),
+            Some(Projection {
+                fields: None,
+                raw: false,
+                origin: false,
+            })
+        );
+        // Virtual fields read unknown parts of the event.
+        assert_eq!(proj("src@geo:ES | stats count"), None);
+        assert_eq!(proj("* | stats count by src@geo"), None);
+        assert_eq!(proj("* | sort src@geo | stats count"), None);
     }
 
     #[test]

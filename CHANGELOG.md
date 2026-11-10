@@ -26,6 +26,16 @@ with no prefix (`0.1.0`).
   fails with `TooManyEvents` when the stream exceeds `max_materialized`.
 - `EvstoreSource` decodes plain top-level fields without building an
   object tree (about 20% less time per event in a raw search).
+- **Breaking:** `StoreQuery` has a new public field, `projection`
+  (`Option<store::Projection>`), so struct literals need it (or
+  `..StoreQuery::default()`). It says which fields, and whether the raw
+  data and origin, the caller reads; a backend may return more.
+  `JsonlStore` ignores it, and `EvstoreSource` decodes only what is asked.
+- When a pipeline's events end in a `stats` the store can't answer itself,
+  `execute` asks the store only for the fields read up to that `stats`
+  (whole events when a virtual field is read). Examples on the bench:
+  `host:web07 | stats dc(user.name)` 34 → 8 ms, and
+  `where … | stats dc(…) by host` 309 → 193 ms.
 
 
 ## [0.1.0]

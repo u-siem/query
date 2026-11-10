@@ -10,7 +10,7 @@
 
 use super::*;
 use crate::store::jsonl::JsonlStore;
-use crate::store::{Pattern, Substrings, TimeRange};
+use crate::store::{Pattern, Substrings, TimeRange, lookup};
 use crate::test_util::TempDir;
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -354,6 +354,7 @@ fn run_queries(
             filter,
             order,
             limit,
+            projection: None,
         };
         let want: Vec<Event> = jsonl.search(&q).unwrap().map(Result::unwrap).collect();
         let got: Vec<Event> = evs.search(&q).unwrap().map(Result::unwrap).collect();
@@ -389,6 +390,52 @@ fn run_queries(
                 }
             }
         }
+        check_projection(rng, evs, &q, &got);
+    }
+}
+
+/// A projected search returns the same events, in the same order, with
+/// every read path resolving as on the whole event.
+fn check_projection(rng: &mut Rng, evs: &EvstoreSource, q: &StoreQuery, whole: &[Event]) {
+    let fields = (!rng.chance(15)).then(|| {
+        PATHS
+            .iter()
+            .filter(|_| rng.chance(25))
+            .map(|p| (*p).to_string())
+            .collect::<Vec<_>>()
+    });
+    let projection = Projection {
+        fields,
+        raw: rng.chance(30),
+        origin: rng.chance(30),
+    };
+    let pq = StoreQuery {
+        projection: Some(projection.clone()),
+        ..q.clone()
+    };
+    let got: Vec<Event> = evs.search(&pq).unwrap().map(Result::unwrap).collect();
+    let ctx = || format!("{pq:?}");
+    assert_eq!(got.len(), whole.len(), "{}", ctx());
+    for (p, w) in got.iter().zip(whole) {
+        assert_eq!(p.original_time(), w.original_time(), "{}", ctx());
+        assert_eq!(p.arrival_time(), w.arrival_time(), "{}", ctx());
+        if projection.origin {
+            assert_eq!(p.origin(), w.origin(), "{}", ctx());
+        }
+        if projection.raw {
+            assert_eq!(p.raw_data(), w.raw_data(), "{}", ctx());
+        }
+        for (k, v) in p.fields() {
+            assert_eq!(w.get_field(k), Some(v), "{}: extra or changed {k}", ctx());
+        }
+        match &projection.fields {
+            None => assert_eq!(p.fields(), w.fields(), "{}", ctx()),
+            Some(paths) => {
+                for path in paths {
+                    assert_eq!(lookup(p, path), lookup(w, path), "{}: {path}", ctx());
+                }
+            }
+        }
     }
 }
 
@@ -410,7 +457,24 @@ const STATS_FILTERS: [&str; 16] = [
     "user.name:root",
     "host:(nas OR fw-edge) code!=7",
 ];
-const STATS_AGGS: [&str; 11] = [
+const PRE_STATS: [&str; 9] = [
+    "where code>5",
+    "where login",
+    "where user.sub.name:*",
+    "where tags:login OR empty:*",
+    // Order-dependent stages run in time order (unique timestamps), not in
+    // storage order, which differs between the stores.
+    "sort @timestamp | dedup host",
+    "sort @timestamp | dedup user.name",
+    "sort @timestamp | head 40",
+    "sort @timestamp | tail 30",
+    "where @id:*1*",
+];
+const STATS_AGGS: [&str; 15] = [
+    "values(host)",
+    "dc(user.name)",
+    "dc(user.id)",
+    "count(user.sub.name)",
     "count",
     "count(code)",
     "sum(bytes)",
@@ -423,8 +487,9 @@ const STATS_AGGS: [&str; 11] = [
     "dc(host)",
     "count(user.name)",
 ];
-const STATS_BY: [&str; 9] = [
+const STATS_BY: [&str; 10] = [
     "",
+    " by @origin",
     " by host",
     " by ok",
     " by code",
@@ -442,7 +507,13 @@ const STATS_BY: [&str; 9] = [
 /// (`port` holds `5` and `"5"`) and float extremes (`-0.0` vs `0.0`) are
 /// left out: the executor shows the first value it meets for those, so even
 /// two streaming runs over different storage orders disagree.
-fn run_stats(rng: &mut Rng, jsonl: &JsonlStore, evs: &EvstoreSource, n: usize) -> u64 {
+fn run_stats(
+    rng: &mut Rng,
+    jsonl: &JsonlStore,
+    evs: &EvstoreSource,
+    n: usize,
+    pre_stats_pct: u64,
+) -> u64 {
     use crate::query::{ExecOptions, NoVirtualFields, ResultRows, execute, parse};
     let before = evs.pushdowns();
     for i in 0..n {
@@ -455,6 +526,12 @@ fn run_stats(rng: &mut Rng, jsonl: &JsonlStore, evs: &EvstoreSource, n: usize) -
         );
         if rng.chance(30) {
             text.push_str(" | sort -count | head 5");
+        }
+        // Commands before `stats` keep it from being pushed down, so the
+        // executor streams projected events.
+        if rng.chance(pre_stats_pct) {
+            let (head, tail) = text.split_once(" | ").expect("has a pipe");
+            text = format!("{head} | {} | {tail}", rng.pick(&PRE_STATS));
         }
         let query = parse(&text).unwrap_or_else(|e| panic!("{text}: {e:?}"));
         let opts = ExecOptions::default();
@@ -530,11 +607,12 @@ fn differential_against_jsonl() {
     assert_eq!(evs.len(), jsonl.len());
     assert_eq!(evs.field_catalog().fields, jsonl.field_catalog().fields);
     run_queries(&mut rng, &jsonl, &evs, &originals, 250);
-    let pushed = run_stats(&mut rng, &jsonl, &evs, 120);
+    let pushed = run_stats(&mut rng, &jsonl, &evs, 120, 0);
     assert!(
         pushed > 25,
         "only {pushed} of 120 stats queries were pushed down"
     );
+    run_stats(&mut rng, &jsonl, &evs, 120, 70);
 
     // Compaction, flush and reopen change nothing.
     let report = evs.maintain(Timestamp(T0)).unwrap();
@@ -549,7 +627,8 @@ fn differential_against_jsonl() {
     );
     assert_eq!(evs.field_catalog().fields, jsonl.field_catalog().fields);
     run_queries(&mut rng, &jsonl, &evs, &originals, 100);
-    assert!(run_stats(&mut rng, &jsonl, &evs, 60) > 12);
+    assert!(run_stats(&mut rng, &jsonl, &evs, 60, 0) > 12);
+    run_stats(&mut rng, &jsonl, &evs, 40, 70);
 }
 
 #[test]
@@ -578,6 +657,7 @@ fn differential_with_full_field_registry() {
     }
     assert!(evs.store().fields().is_full());
     run_queries(&mut rng, &jsonl, &evs, &originals, 150);
+    run_stats(&mut rng, &jsonl, &evs, 60, 70);
 }
 
 #[test]

@@ -130,6 +130,75 @@ pub struct StoreQuery {
     pub order: Order,
     /// At most this many events.
     pub limit: Option<usize>,
+    /// What the caller reads from each event (`None`: everything). A
+    /// backend may return more than asked.
+    pub projection: Option<Projection>,
+}
+
+/// The parts of each event a caller reads, so a backend can skip decoding
+/// the rest.
+///
+/// Events of a projected search may lack fields that were not asked for,
+/// and carry empty raw data and an empty hostname origin unless
+/// [`raw`](Projection::raw) and [`origin`](Projection::origin) are set
+/// ([`Event::id`] needs both). `@timestamp` and `@arrival` always come back.
+/// [`Projection::default`] reads nothing.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Projection {
+    /// Field paths read, as [`lookup`] resolves them (`None`: every field).
+    pub fields: Option<Vec<String>>,
+    /// Whether the raw data is read (needed for `@id`).
+    pub raw: bool,
+    /// Whether the origin is read (needed for `@origin` and `@id`).
+    pub origin: bool,
+}
+
+impl Default for Projection {
+    fn default() -> Projection {
+        Projection {
+            fields: Some(Vec::new()),
+            raw: false,
+            origin: false,
+        }
+    }
+}
+
+impl Projection {
+    /// Adds the field `path`. Returns `false` for a virtual field: what it
+    /// reads is unknown, so the caller must read whole events.
+    pub fn read_field(&mut self, path: &str) -> bool {
+        if crate::query::is_virtual_field(path) {
+            return false;
+        }
+        if let Some(meta) = path.strip_prefix('@') {
+            // `@timestamp` and `@arrival` always come back.
+            match meta {
+                "id" => (self.raw, self.origin) = (true, true),
+                "origin" => self.origin = true,
+                _ => {}
+            }
+        } else if let Some(fields) = &mut self.fields
+            && !fields.iter().any(|f| f == path)
+        {
+            fields.push(path.to_string());
+        }
+        true
+    }
+
+    /// Adds what `predicate` reads: its fields, or every field for a bare
+    /// text term. Returns `false` as [`Projection::read_field`] does.
+    pub fn read(&mut self, predicate: &Predicate) -> bool {
+        match predicate {
+            Predicate::True => true,
+            Predicate::Text(_) => {
+                self.fields = None;
+                true
+            }
+            Predicate::And(ps) | Predicate::Or(ps) => ps.iter().all(|p| self.read(p)),
+            Predicate::Not(p) => self.read(p),
+            Predicate::Field { field, .. } => self.read_field(field),
+        }
+    }
 }
 
 /// The events a search yields, or the error that stopped it.

@@ -30,6 +30,11 @@
 //! the same as [`JsonlStore`](super::jsonl::JsonlStore)'s, while evstore
 //! still prunes segments, chunks and dictionary values. Limits apply after
 //! the re-check.
+//!
+//! A [`Projection`] is mapped to stored names: every name under a top-level
+//! field that a read path can resolve through, plus whatever the re-check
+//! reads. Past the field cap, names in the overflow field can't be listed,
+//! so the projection is ignored.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv6Addr};
@@ -42,7 +47,7 @@ use usiem_evstore as ev;
 
 use super::{
     AppendAck, Cidr, EventIter, EventSource, EventStore, FieldCatalog, FieldKind, FieldOp, Literal,
-    Order, Pattern, Predicate, StatsTable, StoreError, StoreQuery, compare_values,
+    Order, Pattern, Predicate, Projection, StatsTable, StoreError, StoreQuery, compare_values,
 };
 use crate::Event;
 use crate::query::exec::{StatsGroup, display_value, stats_table};
@@ -167,7 +172,11 @@ impl EvstoreSource {
         };
         let mut origins = OriginCache::default();
         for rec in self.store.search(&query).map_err(ev_err)? {
-            catalog.observe(&decode_with(rec.map_err(ev_err)?, &mut origins)?);
+            catalog.observe(&decode_with(
+                rec.map_err(ev_err)?,
+                &mut origins,
+                Optional::default(),
+            )?);
         }
         self.catalog = catalog;
         self.catalog_dirty = true;
@@ -227,17 +236,32 @@ impl EventSource for EvstoreSource {
             translate_exact(registry, &query.filter)
         };
         let recheck = exact.is_none().then(|| query.filter.clone());
+        // A projection must also cover what the re-check reads. Past the
+        // field cap, names hidden in the overflow field can't be listed.
+        let projection = query
+            .projection
+            .clone()
+            .filter(|_| !registry.is_full())
+            .and_then(|mut p| recheck.as_ref().is_none_or(|f| p.read(f)).then_some(p));
+        let optional = Optional {
+            raw: projection.as_ref().is_some_and(|p| !p.raw),
+            origin: projection.as_ref().is_some_and(|p| !p.origin),
+        };
         let pushed = ev::Query {
             time,
             filter: exact.unwrap_or_else(|| translate(registry, &query.filter)),
             order,
             limit: None,
+            fields: projection.map(|p| stored_names(registry, &p)),
         };
         let records = self.store.search(&pushed).map_err(ev_err)?;
         let range = query.time;
         let mut origins = OriginCache::default();
         let events = records.filter_map(move |r| {
-            match r.map_err(ev_err).and_then(|r| decode_with(r, &mut origins)) {
+            match r
+                .map_err(ev_err)
+                .and_then(|r| decode_with(r, &mut origins, optional))
+            {
                 Ok(e) => (range.contains(e.original_time())
                     && recheck.as_ref().is_none_or(|f| f.matches(&e)))
                 .then_some(Ok(e)),
@@ -313,6 +337,53 @@ fn plain_types(registry: &ev::FieldRegistry, path: &str) -> Option<Vec<ev::Value
             .map(|id| registry.info(*id).ty)
             .collect(),
     )
+}
+
+/// The top-level field a stored name belongs to (escaping `@` removed).
+fn top_key(stored: &str) -> &str {
+    let name = stored
+        .strip_prefix('@')
+        .filter(|r| r.starts_with('@'))
+        .unwrap_or(stored);
+    let end = name
+        .find([OBJ_SEP, ARRAY, COMPLEX, OBJECT])
+        .unwrap_or(name.len());
+    &name[..end]
+}
+
+/// Stored names to read for `p`: `@arrival`, the origin and raw data if
+/// read, and every name under a top-level field that [`lookup`]
+/// may resolve a read path through (the path itself, or a dotted prefix of
+/// it holding an object).
+///
+/// [`lookup`]: super::lookup
+fn stored_names(registry: &ev::FieldRegistry, p: &Projection) -> Vec<String> {
+    let mut out = vec![F_ARRIVAL.to_string()];
+    if p.origin {
+        out.push(F_ORIGIN.to_string());
+    }
+    if p.raw {
+        out.extend([F_RAW.to_string(), F_RAW_JSON.to_string()]);
+    }
+    for (_, info) in registry.iter() {
+        let name = info.name.as_str();
+        if [F_ARRIVAL, F_ORIGIN, F_RAW, F_RAW_JSON, F_COMPLEX].contains(&name) {
+            continue;
+        }
+        let keep = p.fields.as_ref().is_none_or(|paths| {
+            let top = top_key(name);
+            paths.iter().any(|path| {
+                path.strip_prefix(top)
+                    .is_some_and(|r| r.is_empty() || r.starts_with('.'))
+            })
+        });
+        if keep {
+            out.push(name.to_string());
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
 }
 
 /// The evstore filter matching exactly what `pred` matches, if there is one.
@@ -776,10 +847,24 @@ impl OriginCache {
 
 #[cfg(test)]
 fn decode(rec: ev::Record) -> Result<Event, StoreError> {
-    decode_with(rec, &mut OriginCache::default())
+    decode_with(rec, &mut OriginCache::default(), Optional::default())
 }
 
-fn decode_with(rec: ev::Record, origins: &mut OriginCache) -> Result<Event, StoreError> {
+/// Event parts a projected search may leave out (see [`Projection`]).
+#[derive(Debug, Clone, Copy, Default)]
+struct Optional {
+    /// A missing raw field becomes empty text.
+    raw: bool,
+    /// A missing origin becomes an empty hostname.
+    origin: bool,
+}
+
+/// Rebuilds an event; parts marked `optional` may be missing.
+fn decode_with(
+    rec: ev::Record,
+    origins: &mut OriginCache,
+    optional: Optional,
+) -> Result<Event, StoreError> {
     let mut arrival = None;
     let mut origin = None;
     let mut raw = None;
@@ -823,8 +908,16 @@ fn decode_with(rec: ev::Record, origins: &mut OriginCache) -> Result<Event, Stor
     let mut event = Event::new(
         arrival.ok_or_else(|| corrupt("missing @arrival"))?,
         Timestamp(rec.ts),
-        origin.ok_or_else(|| corrupt("missing @origin"))?,
-        raw.ok_or_else(|| corrupt("missing raw data"))?,
+        match origin {
+            Some(origin) => origin,
+            None if optional.origin => Origin::Hostname(String::new()),
+            None => return Err(corrupt("missing @origin")),
+        },
+        match raw {
+            Some(raw) => raw,
+            None if optional.raw => RawData::Text(String::new()),
+            None => return Err(corrupt("missing raw data")),
+        },
     );
     for (k, value) in flat {
         if root.contains_key(&k) {
