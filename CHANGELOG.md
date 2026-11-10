@@ -37,6 +37,12 @@ with no prefix (`0.1.0`).
   `host:web07 | stats dc(user.name)` 34 → 8 ms, and
   `where … | stats dc(…) by host` 309 → 193 ms.
 
+### Documentation
+
+- `docs/query-language.md`: the full query language reference (filter
+  terms, matching rules by type, time ranges, fields, pipe commands,
+  backend pushdown, errors, gotchas and a cookbook).
+
 
 ## [0.1.0]
 

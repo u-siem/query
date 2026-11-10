@@ -37,6 +37,9 @@
 //! `sort -a +b`, `head [n]`, `tail [n]`, `dedup a b`,
 //! `stats <agg> [as name], ... [by a, b]` with `count`, `count(f)`, `dc(f)`,
 //! `min(f)`, `max(f)`, `sum(f)`, `avg(f)`, `values(f)`.
+//!
+//! The full reference, with matching rules and gotchas, is
+//! [`docs/query-language.md`](https://github.com/u-siem/query/blob/main/docs/query-language.md).
 
 pub mod exec;
 pub mod parser;

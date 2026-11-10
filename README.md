@@ -43,7 +43,8 @@ println!("{} rows", result.len());
 - `store`:
   - the `EventSource` trait (read side) and the `EventStore` trait (read and
     append);
-  - `StoreQuery`, which a backend evaluates;
+  - `StoreQuery`, which a backend evaluates, with its `Projection` (the
+    parts of each event the caller reads);
   - `Predicate`, the filter tree, with `Literal`, `Pattern`, `Cidr` and
     `Substrings`;
   - `FieldCatalog`, the fields a store has seen.
@@ -54,7 +55,9 @@ println!("{} rows", result.len());
   [usiem-evstore](https://github.com/u-siem/evstore) backend.
 - `text`: value and time formatting for terminals.
 
-The full syntax reference is in the `query` module docs and in `query::HELP`.
+The full language reference is [docs/query-language.md](docs/query-language.md):
+syntax, matching rules, pipe commands, backend pushdown, and a cookbook. A
+short plain-text version for help screens is `query::HELP`.
 
 ## Query text is untrusted input
 
