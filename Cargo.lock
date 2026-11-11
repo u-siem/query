@@ -357,6 +357,8 @@ name = "usiem-query"
 version = "0.1.0"
 dependencies = [
  "aho-corasick",
+ "regex",
+ "regex-syntax",
  "serde",
  "serde_json",
  "usiem",

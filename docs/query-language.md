@@ -45,12 +45,14 @@ in [`query::HELP`](../src/query/mod.rs).
 | `field:>v`, `field:>=v`, `field:<v`, `field:<=v` | The same comparison, written after `:`. |
 | `field:1..9`, `field:1..`, `field:..9` | Inclusive range. Either end may be left open. |
 | `field!=value` | Not `field:value`. Any right-hand side works: `f!=*`, `f!=(a OR b)`, `f!=10.0.0.0/8`, `f!=1..5`. |
+| `field=~"re"` | A regular expression is found in the value. Case-**sensitive**, unlike everything else; `(?i)` turns case off. The pattern must be quoted. |
+| `field!~"re"` | Not `field=~"re"`. |
 | `word` | Some text field of the event contains `word`. |
 | `"two words"` | Some text field contains the phrase. |
 | `earliest=T`, `latest=T` | Time range on the event time (see [§5](#5-time-range-earliest-and-latest)). |
 
 A field name is made of letters, digits and `_ . @ -`. A term is a field
-term when one of the operators `>= <= != : = > <` follows the name
+term when one of the operators `=~ !~ >= <= != : = > <` follows the name
 **immediately**. `user.name : bob`, with spaces, is three bare words.
 
 A **bare word** is a substring search over the event's text values
@@ -171,6 +173,29 @@ Globs are case-insensitive and must match the **whole** value:
 and times the glob is matched against the value's text form, so
 `source.ip:10.0.*` matches the IP `10.0.3.7`. Bytes and objects never
 match.
+
+### Regular expressions
+
+`field=~"re"` matches when the pattern is found **anywhere** in the value;
+anchor with `^` and `$` to match the whole value. It is the one
+case-sensitive test: `process.name=~"^power"` misses `PowerShell.exe`, and
+`process.name=~"(?i)^power"` finds it. Like globs, numbers, booleans, IPs
+and times are matched against their text form, and bytes and objects never
+match. On an array, any element may match.
+
+The syntax is that of the Rust `regex` crate (Perl-like classes, `\d`,
+`\w`, `\s`, `(?i)`, `(?m)`, `(?s)`, named groups). Matching takes time
+linear in the value whatever the pattern, so there are no look-around
+assertions (`(?=…)`, `(?<!…)`) and no backreferences (`\1`): a pattern
+using them is a syntax error. The pattern must be in double quotes, where
+the only escape is `\"`, so backslashes reach the regex as written:
+`message=~"user \w+ from \d+\.\d+"`.
+
+On the evstore backend a regex is not answered by the index directly. The
+store returns the events whose value contains one of the texts every match
+must contain (`fail(ed|ure)` needs `failed` or `failure`), or every event
+with the field when there is no such text, and the regex is checked on
+those.
 
 ### CIDR
 

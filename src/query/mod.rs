@@ -21,6 +21,7 @@
 //! | `field:>10`, `field<=x`    | comparison (numbers, times, IPs, text)             |
 //! | `field:1..10`              | inclusive range                                    |
 //! | `field!=value`             | not equal                                          |
+//! | `field=~"re"`, `field!~"re"` | regex found in the value (case-sensitive) / not  |
 //! | `word`, `"some words"`     | any string field contains it                       |
 //! | `earliest=T` `latest=T`    | time range on the event time (`latest` exclusive)  |
 //! | `AND`, `OR`, `NOT`, `( )`  | boolean logic; juxtaposition means AND             |
@@ -212,6 +213,7 @@ pub const HELP: &str = r#"SEARCH                          (terms side by side me
   field:(a OR b OR c)           any of
   field:>10  field<=x  f:1..9   comparisons and inclusive range
   field!=value                  not equal
+  field=~"re"   field!~"re"     regex search (case-sensitive; (?i) ignores case)
   word   "two words"            any text field contains it
   earliest=2024-01-01 latest="2024-01-02 12:00:00"     event-time range (UTC)
   AND  OR  NOT  ( )             upper case; lower-case 'or' is a plain word

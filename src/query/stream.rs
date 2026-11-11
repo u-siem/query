@@ -157,6 +157,8 @@ mod tests {
             "n:1..9",
             "msg:\"two words\" \"say \\\"hi\\\"\"",
             "path:\"C:\\Windows\\*\"",
+            r#"msg=~"fail(ed|ure) for \w+""#,
+            r#"user!~"(?i)^admin$""#,
         ] {
             let parsed = StreamFilter::parse(q).unwrap();
             let text = parsed.predicate().to_string();

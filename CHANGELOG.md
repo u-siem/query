@@ -7,6 +7,20 @@ with no prefix (`0.1.0`).
 
 ## [Unreleased]
 
+### Added
+
+- Regular expressions: `field=~"re"` and `field!~"re"`, as
+  `FieldOp::Regex` / `store::Regex`.
+  - Matching is an unanchored search and case-sensitive unless the pattern
+    sets `(?i)`.
+  - The engine is the `regex` crate: linear time in the text for any
+    pattern, so patterns from users are safe on every event. Look-around and
+    backreferences are refused when parsed, and so is a pattern over 10 MiB
+    compiled.
+  - `Regex::required_literals` gives texts every match contains, when the
+    pattern proves a small set. `EvstoreSource` pushes them down as globs
+    (else "the field exists") and rechecks; prefilters can use them too.
+
 ### Changed
 
 - `EvstoreSource::search`:

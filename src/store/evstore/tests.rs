@@ -10,7 +10,7 @@
 
 use super::*;
 use crate::store::jsonl::JsonlStore;
-use crate::store::{Pattern, Substrings, TimeRange, lookup};
+use crate::store::{Pattern, Regex, Substrings, TimeRange, lookup};
 use crate::test_util::TempDir;
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -263,6 +263,7 @@ const CIDRS: [&str; 5] = [
     "2001:db8::/120",
     "0.0.0.0/0",
 ];
+const REGEXES: [&str; 6] = ["^web", "(?i)login", r"0\.0", "d[a-c]", r"^\d+$", "ro+t|db8"];
 const TERMS: [&str; 6] = ["web", "10.0", "LOGIN", "root", "a", "db8"];
 
 fn literal(rng: &mut Rng) -> Literal {
@@ -270,8 +271,9 @@ fn literal(rng: &mut Rng) -> Literal {
 }
 
 fn random_op(rng: &mut Rng) -> FieldOp {
-    match rng.below(7) {
+    match rng.below(8) {
         0 => FieldOp::Exists,
+        7 => FieldOp::Regex(Regex::new(rng.pick::<&str>(&REGEXES)).unwrap()),
         1 => FieldOp::Eq(literal(rng)),
         2 => FieldOp::In(vec![literal(rng), literal(rng)]),
         3 => FieldOp::Wildcard(Pattern::new(rng.pick::<&str>(&GLOBS))),
@@ -627,7 +629,13 @@ fn differential_against_jsonl() {
     );
     assert_eq!(evs.field_catalog().fields, jsonl.field_catalog().fields);
     run_queries(&mut rng, &jsonl, &evs, &originals, 100);
-    assert!(run_stats(&mut rng, &jsonl, &evs, 60, 0) > 12);
+    // Filters holding a regex are never exact, so never pushed: the floor
+    // only catches pushdown breaking altogether.
+    let pushed = run_stats(&mut rng, &jsonl, &evs, 60, 0);
+    assert!(
+        pushed > 6,
+        "only {pushed} of 60 stats queries were pushed down"
+    );
     run_stats(&mut rng, &jsonl, &evs, 40, 70);
 }
 

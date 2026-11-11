@@ -60,6 +60,10 @@ pub enum FieldOp {
     /// `f:*a* OR f:*b* OR ...` means, in one pass over the value. Built in
     /// code (detection rules); the query parser never produces it.
     ContainsAny(Substrings),
+    /// A regular expression found anywhere in the value (`field=~"re"`).
+    /// Unlike every other test it is case-sensitive, unless the pattern
+    /// says `(?i)`.
+    Regex(Regex),
 }
 
 impl Predicate {
@@ -159,6 +163,9 @@ impl std::fmt::Display for Predicate {
                 }
                 FieldOp::Wildcard(p) => write!(f, "{field}:{}", quote(p.as_str())),
                 FieldOp::Cidr(c) => write!(f, "{field}:{c}"),
+                FieldOp::Regex(re) => {
+                    write!(f, "{field}=~\"{}\"", re.as_str().replace('"', "\\\""))
+                }
                 FieldOp::ContainsAny(subs) => {
                     let items: Vec<String> = subs
                         .needles()
@@ -259,6 +266,11 @@ impl FieldOp {
                 FieldValue::Str(s) => subs.matches(s),
                 FieldValue::Object(_) | FieldValue::Bytes(_) => false,
                 other => subs.matches(&other.to_string()),
+            },
+            FieldOp::Regex(re) => match value {
+                FieldValue::Str(s) => re.is_match(s),
+                FieldValue::Object(_) | FieldValue::Bytes(_) => false,
+                other => re.is_match(&other.to_string()),
             },
         }
     }
@@ -688,6 +700,110 @@ impl PartialEq for Substrings {
 impl std::fmt::Debug for Substrings {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_tuple("Substrings").field(&self.needles).finish()
+    }
+}
+
+/// A compiled regular expression for [`FieldOp::Regex`].
+///
+/// The engine is the `regex` crate: matching takes linear time in the text
+/// whatever the pattern (no catastrophic backtracking), so patterns from API
+/// users are safe to run on every event. It has no look-around and no
+/// backreferences; such patterns are refused when compiled.
+#[derive(Clone)]
+pub struct Regex {
+    source: String,
+    regex: regex::Regex,
+}
+
+impl Regex {
+    /// Largest compiled program accepted, in bytes: the `regex` crate's
+    /// default. Unicode classes count: `\w{1,64}` takes over 1 MiB.
+    pub const SIZE_LIMIT: usize = 10 << 20;
+
+    /// Compiles `pattern`. Matching is unanchored (`^`/`$` anchor) and
+    /// case-sensitive unless the pattern sets `(?i)`.
+    ///
+    /// # Errors
+    ///
+    /// The pattern's syntax error, an unsupported feature (look-around,
+    /// backreferences) or a pattern over [`Regex::SIZE_LIMIT`].
+    pub fn new(pattern: &str) -> Result<Regex, String> {
+        let regex = regex::RegexBuilder::new(pattern)
+            .size_limit(Self::SIZE_LIMIT)
+            .build()
+            .map_err(|e| match e {
+                regex::Error::Syntax(msg) => msg
+                    .lines()
+                    .find_map(|l| l.strip_prefix("error: "))
+                    .map_or(msg.clone(), str::to_string),
+                regex::Error::CompiledTooBig(_) => {
+                    format!(
+                        "the regex is larger than {} bytes compiled",
+                        Self::SIZE_LIMIT
+                    )
+                }
+                other => other.to_string(),
+            })?;
+        Ok(Regex {
+            source: pattern.to_string(),
+            regex,
+        })
+    }
+
+    /// The pattern as given.
+    pub fn as_str(&self) -> &str {
+        &self.source
+    }
+
+    /// Whether the pattern occurs in `text`.
+    pub fn is_match(&self, text: &str) -> bool {
+        self.regex.is_match(text)
+    }
+
+    /// Texts of which every match contains at least one, when the pattern
+    /// proves such a set (each non-empty, at most 64): `fail(ed|ure)` gives
+    /// `failed` and `failure`. Lets an index or a substring prefilter skip
+    /// values without running the regex. `None` when no small set exists,
+    /// e.g. `\d+` or `a|.*`.
+    pub fn required_literals(&self) -> Option<Vec<String>> {
+        use regex_syntax::hir::literal::{ExtractKind, Extractor};
+        let hir = regex_syntax::ParserBuilder::new()
+            .build()
+            .parse(&self.source)
+            .ok()?;
+        let best = [ExtractKind::Prefix, ExtractKind::Suffix]
+            .into_iter()
+            .filter_map(|kind| {
+                let mut seq = Extractor::new().kind(kind).extract(&hir);
+                seq.optimize_for_prefix_by_preference();
+                let lits = seq.literals()?;
+                if lits.is_empty() || lits.len() > 64 {
+                    return None;
+                }
+                let texts = lits
+                    .iter()
+                    .map(|l| String::from_utf8(l.as_bytes().to_vec()).ok())
+                    .collect::<Option<Vec<String>>>()?;
+                let shortest = texts.iter().map(String::len).min()?;
+                (shortest > 0).then_some((shortest, texts))
+            })
+            .max_by_key(|(shortest, _)| *shortest)?;
+        let mut texts = best.1;
+        texts.sort();
+        texts.dedup();
+        Some(texts)
+    }
+}
+
+impl PartialEq for Regex {
+    fn eq(&self, other: &Self) -> bool {
+        self.source == other.source
+    }
+}
+
+impl std::fmt::Debug for Regex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("Regex").field(&self.source).finish()
     }
 }
 

@@ -2,7 +2,7 @@
 
 use super::{Agg, AggFunc, Command, GroupKey, Query, SortKey, Span};
 use crate::store::predicate::parse_time;
-use crate::store::{Cidr, FieldOp, Literal, Pattern, Predicate, TimeRange};
+use crate::store::{Cidr, FieldOp, Literal, Pattern, Predicate, Regex, TimeRange};
 use std::fmt;
 use usiem::event::Timestamp;
 
@@ -291,7 +291,7 @@ impl<'a> FilterParser<'a> {
         let name = &self.rest()[..name_len];
         let after = &self.rest()[name_len..];
         if !name.is_empty() {
-            let operator = [">=", "<=", "!=", ":", "=", ">", "<"]
+            let operator = ["=~", "!~", ">=", "<=", "!=", ":", "=", ">", "<"]
                 .into_iter()
                 .find(|op| after.starts_with(op));
             if let Some(op) = operator {
@@ -336,6 +336,28 @@ impl<'a> FilterParser<'a> {
             return Ok(Predicate::True);
         }
         match op {
+            "=~" | "!~" => {
+                let value_pos = self.pos;
+                if self.peek() != Some('"') {
+                    return self.error(format!(
+                        "a regex after {op} must be quoted: {field}{op}\"...\""
+                    ));
+                }
+                let pattern = self.quoted()?;
+                let re = match Regex::new(&pattern) {
+                    Ok(re) => re,
+                    Err(e) => {
+                        self.pos = value_pos;
+                        return self.error(format!("bad regex: {e}"));
+                    }
+                };
+                let test = Predicate::field(field, FieldOp::Regex(re));
+                Ok(if op == "!~" {
+                    Predicate::Not(Box::new(test))
+                } else {
+                    test
+                })
+            }
             ":" | "=" => self.match_expr(field),
             "!=" => {
                 let eq = self.match_expr(field)?;

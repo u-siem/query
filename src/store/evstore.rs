@@ -415,6 +415,8 @@ fn translate_exact(registry: &ev::FieldRegistry, pred: &Predicate) -> Option<ev:
                     types.iter().all(|t| *t == T::Str)
                         && subs.needles().iter().all(|n| !Pattern::has_wildcards(n))
                 }
+                // Globs can't say what a regex says.
+                FieldOp::Regex(_) => false,
             };
             if !ok {
                 return None;
@@ -1058,6 +1060,24 @@ fn value_filters(name: &str, op: &FieldOp, out: &mut Vec<ev::Filter>) {
                 );
             }
         }
+        // A superset: values holding one of the texts every match must
+        // contain (case-insensitive globs keep a case-sensitive regex's
+        // matches), or else any value. Rechecked after the store.
+        FieldOp::Regex(re) => match re
+            .required_literals()
+            .filter(|lits| lits.iter().all(|l| !Pattern::has_wildcards(l)))
+        {
+            Some(lits) => {
+                for l in lits {
+                    value_filters(
+                        name,
+                        &FieldOp::Wildcard(Pattern::new(&format!("*{l}*"))),
+                        out,
+                    );
+                }
+            }
+            None => out.push(f(ev::FieldOp::Exists)),
+        },
     }
 }
 

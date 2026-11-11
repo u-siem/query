@@ -21,6 +21,8 @@ include = [
 usiem = { version = "0.1", git = "https://github.com/u-siem/usiem", rev = "853e48b0900612e2cce0ba750adb38d9bb6c2650", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 aho-corasick = "1"
+regex = "1"
+regex-syntax = "0.8"
 serde_json = { version = "1", optional = true }
 usiem-evstore = { version = "0.1", git = "https://github.com/u-siem/evstore", rev = "40483802e154dc14585db9bdae298370c4ab6dc3", optional = true }
 
