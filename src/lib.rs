@@ -48,8 +48,8 @@
 //!     Origin::Collector("doc".into()),
 //!     RawData::from_text("sshd: Accepted password for bob"),
 //! );
-//! event.add_field("process.name".into(), FieldValue::from("sshd"));
-//! event.add_field("user.name".into(), FieldValue::from("Bob"));
+//! event.add_field("process.name", FieldValue::from("sshd"));
+//! event.add_field("user.name", FieldValue::from("Bob"));
 //!
 //! let filter = StreamFilter::parse("process.name:sshd user.name:(alice OR bob)")?;
 //! assert!(filter.matches(&event));
@@ -69,4 +69,4 @@ pub mod text;
 mod test_util;
 
 /// The real uSIEM event struct (`usiem::event::Event` is the object builder).
-pub use usiem::event::CoreEvent as Event;
+pub use usiem::event::Event;

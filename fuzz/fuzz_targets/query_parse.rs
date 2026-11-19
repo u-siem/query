@@ -21,25 +21,25 @@ fn event() -> &'static Event {
             Origin::Collector("fuzz".into()),
             RawData::from_text("raw"),
         );
-        e.add_field("user.name".into(), FieldValue::from("Administrator"));
+        e.add_field("user.name", FieldValue::from("Administrator"));
         e.add_field(
-            "process.command_line".into(),
+            "process.command_line",
             FieldValue::from(r"C:\Windows\cmd.exe /c é"),
         );
-        e.add_field("event.code".into(), FieldValue::Int(4624));
-        e.add_field("bytes".into(), FieldValue::Uint(u64::MAX));
-        e.add_field("ratio".into(), FieldValue::Float(f64::NAN));
-        e.add_field("ok".into(), FieldValue::Bool(true));
+        e.add_field("event.code", FieldValue::Int(4624));
+        e.add_field("bytes", FieldValue::Uint(u64::MAX));
+        e.add_field("ratio", FieldValue::Float(f64::NAN));
+        e.add_field("ok", FieldValue::Bool(true));
         e.add_field(
-            "at".into(),
+            "at",
             FieldValue::Time(Timestamp::from_nanos(i64::MIN)),
         );
         e.add_field(
-            "source.ip".into(),
+            "source.ip",
             FieldValue::Ip(Ip::from_str("10.1.2.3").expect("valid ip")),
         );
         e.add_field(
-            "tags".into(),
+            "tags",
             FieldValue::Array(vec![FieldValue::from("a"), FieldValue::Int(-1)]),
         );
         e

@@ -9,7 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-usiem = { git = "https://github.com/u-siem/usiem", rev = "853e48b0900612e2cce0ba750adb38d9bb6c2650", features = ["serde"] }
+usiem = { git = "https://github.com/u-siem/usiem", rev = "b7b1f8aebf6e2a71e795bb03b1ca3d45723030d9", features = ["serde"] }
 usiem-query = { path = "..", default-features = false }
 
 # Not part of the crate's (non-existent) workspace.

@@ -18,7 +18,7 @@ include = [
 ]
 
 [dependencies]
-usiem = { version = "0.1", git = "https://github.com/u-siem/usiem", rev = "853e48b0900612e2cce0ba750adb38d9bb6c2650", features = ["serde"] }
+usiem = { version = "0.2", git = "https://github.com/u-siem/usiem", rev = "b7b1f8aebf6e2a71e795bb03b1ca3d45723030d9", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 aho-corasick = "1"
 regex = "1"

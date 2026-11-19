@@ -1011,16 +1011,10 @@ mod tests {
             Origin::File("Security.evtx".into()),
             RawData::from_text(format!("{secs}{user}{ip}{code}")),
         );
-        e.add_field("user.name".into(), FieldValue::from(user));
-        e.add_field(
-            "source.ip".into(),
-            FieldValue::Ip(Ip::from_str(ip).unwrap()),
-        );
-        e.add_field("event.code".into(), FieldValue::Int(code));
-        e.add_field(
-            "bytes".into(),
-            FieldValue::Uint(u64::try_from(secs).unwrap() * 10),
-        );
+        e.add_field("user.name", FieldValue::from(user));
+        e.add_field("source.ip", FieldValue::Ip(Ip::from_str(ip).unwrap()));
+        e.add_field("event.code", FieldValue::Int(code));
+        e.add_field("bytes", FieldValue::Uint(u64::try_from(secs).unwrap() * 10));
         e
     }
 
@@ -1306,7 +1300,7 @@ mod tests {
                 2 => FieldValue::Float(2.5),
                 _ => FieldValue::Ip(Ip::from_str("10.0.0.2").unwrap()),
             };
-            e.add_field("v".into(), v);
+            e.add_field("v", v);
             events.push(e);
         }
         s.append(events).unwrap();

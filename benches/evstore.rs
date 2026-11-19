@@ -73,12 +73,12 @@ fn event(rng: &mut Rng, ts: i64) -> Event {
         RawData::from_text(raw),
     );
     let s = |v: &str| FieldValue::Str(Text::from(v));
-    e.add_field("host".into(), s(&host));
-    e.add_field("user.name".into(), s(&user));
-    e.add_field("source.ip".into(), FieldValue::Ip(Ip::from(IpAddr::V4(ip))));
-    e.add_field("source.port".into(), FieldValue::Uint(port));
+    e.add_field("host", s(&host));
+    e.add_field("user.name", s(&user));
+    e.add_field("source.ip", FieldValue::Ip(Ip::from(IpAddr::V4(ip))));
+    e.add_field("source.port", FieldValue::Uint(port));
     e.add_field(
-        "event.code".into(),
+        "event.code",
         FieldValue::Int(CODES[rng.below(CODES.len() as u64) as usize]),
     );
     e

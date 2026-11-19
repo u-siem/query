@@ -761,8 +761,8 @@ fn tail_and_top_k_match_full_pipelines() {
                 Origin::Hostname("h".into()),
                 RawData::from_text(format!("line {i}")),
             );
-            e.add_field("code".into(), FieldValue::Int(i % 5));
-            e.add_field("n".into(), FieldValue::Int(i));
+            e.add_field("code", FieldValue::Int(i % 5));
+            e.add_field("n", FieldValue::Int(i));
             e
         })
         .collect();

@@ -739,7 +739,7 @@ fn encode(event: &Event) -> Result<ev::Record, StoreError> {
         let stored = if name.starts_with('@') {
             format!("@{name}")
         } else {
-            name.clone()
+            name.to_string()
         };
         put(&mut rec, stored, value, &mut complex)?;
     }

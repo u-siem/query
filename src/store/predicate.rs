@@ -287,7 +287,11 @@ pub fn lookup<'a>(event: &'a Event, path: &str) -> Option<Cow<'a, FieldValue>> {
             "timestamp" => Some(Cow::Owned(FieldValue::Time(event.original_time()))),
             "arrival" => Some(Cow::Owned(FieldValue::Time(event.arrival_time()))),
             "origin" => Some(Cow::Owned(FieldValue::from(event.origin().to_string()))),
-            "id" => Some(Cow::Owned(FieldValue::from(event.id().to_string()))),
+            // The stored id when the event carries one: it is what alerts
+            // and evidence written at ingest time link to.
+            "id" => Some(Cow::Owned(FieldValue::from(
+                event.stored_or_computed_id().to_string(),
+            ))),
             _ => None,
         };
     }
@@ -929,6 +933,17 @@ mod tests {
             e.add_field(k.to_string(), v.clone());
         }
         e
+    }
+
+    /// Events stored with an `event.id` (possibly written by an older
+    /// hash) keep answering to it, so links made at ingest time resolve.
+    #[test]
+    fn meta_id_prefers_the_stored_id() {
+        let computed = event(&[]).id().to_string();
+        let id = |e: &Event| lookup(e, "@id").map(|v| v.to_string());
+        assert_eq!(id(&event(&[])), Some(computed));
+        let stored = event(&[("event.id", FieldValue::str("00000000000000ff"))]);
+        assert_eq!(id(&stored).as_deref(), Some("00000000000000ff"));
     }
 
     #[test]

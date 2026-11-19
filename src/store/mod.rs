@@ -366,9 +366,9 @@ impl FieldCatalog {
     /// Counts `event`'s fields (and inventory values).
     pub fn observe(&mut self, event: &Event) {
         for (name, value) in event.fields() {
-            let stats = match self.fields.get_mut(name) {
+            let stats = match self.fields.get_mut(name.as_str()) {
                 Some(stats) => stats,
-                None => self.fields.entry(name.clone()).or_default(),
+                None => self.fields.entry(name.to_string()).or_default(),
             };
             stats.count += 1;
             stats.kinds.insert(FieldKind::of(value));
@@ -434,7 +434,7 @@ mod tests {
                 Origin::Collector("t".into()),
                 RawData::from_text(""),
             );
-            e.add_field("artifact.name".into(), FieldValue::from(name));
+            e.add_field("artifact.name", FieldValue::from(name));
             catalog.observe(&e);
         }
         let inventory: Vec<_> = catalog.inventory("artifact.name").collect();

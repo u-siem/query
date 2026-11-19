@@ -220,7 +220,7 @@ impl EventSource for JsonlStore {
         // Sorting needs every match in memory; a backend with time-sorted
         // segments (evstore) can merge instead.
         let mut events = matches.collect::<Result<Vec<_>, _>>()?;
-        events.sort_by_key(usiem::event::CoreEvent::original_time);
+        events.sort_by_key(usiem::event::Event::original_time);
         if descending {
             events.reverse();
         }
@@ -317,8 +317,8 @@ mod tests {
             Origin::File("Security.evtx".into()),
             RawData::from_text(format!("{secs} {user}")),
         );
-        e.add_field("user.name".into(), FieldValue::from(user));
-        e.add_field("event.code".into(), FieldValue::Int(4624));
+        e.add_field("user.name", FieldValue::from(user));
+        e.add_field("event.code", FieldValue::Int(4624));
         e
     }
 
@@ -426,7 +426,7 @@ mod tests {
             FieldValue::Array(vec![FieldValue::Float(f64::NEG_INFINITY)]),
         ] {
             let mut e = event(10, "alice");
-            e.add_field("v".into(), bad);
+            e.add_field("v", bad);
             let err = store.append(vec![event(5, "bob"), e]).unwrap_err();
             assert!(matches!(err, StoreError::Encode(_)), "{err}");
         }
