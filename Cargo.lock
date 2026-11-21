@@ -330,8 +330,8 @@ checksum = "a2c754d6c33795a1c324727428e5a7dedb5b06195f9890bdbcba760d3e246563"
 
 [[package]]
 name = "usiem"
-version = "0.1.0"
-source = "git+https://github.com/u-siem/usiem?rev=853e48b0900612e2cce0ba750adb38d9bb6c2650#853e48b0900612e2cce0ba750adb38d9bb6c2650"
+version = "0.2.0"
+source = "git+https://github.com/u-siem/usiem?rev=b7b1f8aebf6e2a71e795bb03b1ca3d45723030d9#b7b1f8aebf6e2a71e795bb03b1ca3d45723030d9"
 dependencies = [
  "compact_str",
  "regex",
